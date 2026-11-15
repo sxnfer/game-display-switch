@@ -4,7 +4,7 @@
 //
 // It must never get in a game's way, so:
 //  - It is a layered window drawn through UpdateLayeredWindow: smooth edges, truly transparent around the pill, and no
-//    painting messages. It never takes focus (WS_EX_NOACTIVATE, MA_NOACTIVATE) and has no taskbar or Alt+Tab entry.
+//    painting messages. It is glass (Glass.cs): its region follows the pill, so the blur behind it does too. It never takes focus (WS_EX_NOACTIVATE, MA_NOACTIVATE) and has no taskbar or Alt+Tab entry.
 //  - It only shows while Windows says notifications are welcome (SHQueryUserNotificationState). With a game in
 //    exclusive fullscreen, any fullscreen window in front, or presentation mode it stays away: what it had to say
 //    waits up to 10 s for a better moment, then goes out as an ordinary notification instead, if it has one.
@@ -71,9 +71,10 @@ namespace HdrSwitch
         float k = 1;
         Theme.Fonts fonts;
         Size size;                       // the window: wide enough for the largest pill, as tall as it plus its way in
-        IntPtr dc, dib, oldBitmap;       // the 32-bit premultiplied surface UpdateLayeredWindow shows
-        Bitmap surface;
-        Graphics g;
+        Glass.Surface surface;           // what UpdateLayeredWindow shows
+        Graphics g;                      // draws on it
+        string shape;                    // the pill and bubble the window's region was last set to
+        bool blurOn;
         View cur, prev;
         bool leaving, hovering, through = true;
 
@@ -206,6 +207,7 @@ namespace HdrSwitch
             if (!wasVisible)
             {
                 Motion.Refresh();
+                Glass.Refresh();
                 Place();
             }
             var v = new View { Big = a.Big, Split = a.Split && !a.Big, Title = a.Title, Sub = a.Sub, Text = a.Text ?? a.Title, Dot = a.Dot, Bubble = a.Bubble };
@@ -388,8 +390,7 @@ namespace HdrSwitch
             float bd = S(36), gap = S(6);
             float x = (size.Width - W - b * (gap + bd)) / 2, y = S(10) + (float)drop.Value;
             var pill = new RectangleF(x, y, W, H);
-            Theme.Fill(g, pill, R, Theme.Glass);
-            Theme.Stroke(g, pill, R, Theme.GlassLine);
+            Glass.Panel(g, pill, R);
             using (var clip = Theme.Round(pill, R))
             {
                 g.SetClip(clip);   // text that is still too wide for a growing pill stays inside it
@@ -398,20 +399,33 @@ namespace HdrSwitch
                 Draw(cur, pill, c);
                 g.ResetClip();
             }
+            Glass.Rim(g, pill, R);
+            var br = RectangleF.Empty;
             if (b > 0.02f)
             {
                 float d = bd * Math.Min(1, b);
-                var br = new RectangleF(pill.Right + gap * Math.Min(1, b), y + (S(36) - d) / 2, d, d);
-                Theme.Fill(g, br, d / 2, Theme.Glass);
-                Theme.Stroke(g, br, d / 2, Theme.GlassLine);
+                br = new RectangleF(pill.Right + gap * Math.Min(1, b), y + (S(36) - d) / 2, d, d);
+                Glass.Panel(g, br, d / 2);
+                Glass.Rim(g, br, d / 2);
                 Theme.Dot(g, br.X + d / 2, br.Y + d / 2, S(10) * Math.Min(1, b), cur.Bubble);
             }
-            g.Flush(FlushIntention.Sync);
 
-            var blend = new Native.BlendFunction { SourceConstantAlpha = (byte)Math.Round(255 * Math.Max(0, Math.Min(1, alpha.Value))), AlphaFormat = 1 };   // AC_SRC_ALPHA
-            Point dst = Location, src = Point.Empty;
-            Size sz = size;
-            Native.UpdateLayeredWindow(Handle, IntPtr.Zero, ref dst, ref sz, dc, ref src, 0, ref blend, 2);   // ULW_ALPHA
+            // The region follows the shapes, so the blur stays inside them. It changes only while the pill moves.
+            var pr = Rectangle.Round(pill);
+            var bb = Rectangle.Round(br);
+            string now = pr + "|" + (int)Math.Round(R) + "|" + bb;
+            if (now != shape)
+            {
+                shape = now;
+                using (var p = Theme.Round(pill, R))
+                {
+                    if (!br.IsEmpty) using (var q = Theme.Round(br, br.Width / 2)) p.AddPath(q, false);
+                    Glass.SetShape(Handle, g, p);
+                }
+            }
+            bool blur = Glass.Transparency && alpha.Value >= 0.5;
+            if (blur != blurOn) { Glass.SetBlur(Handle, blur); blurOn = blur; }
+            surface.Present(Handle, Location, alpha.Value);
         }
 
         void Draw(View v, RectangleF pill, double a)
@@ -421,12 +435,8 @@ namespace HdrSwitch
             {
                 float tx = pill.X + S(18) + S(10) + S(14), tw = pill.Right - S(24) - tx;
                 Theme.Dot(g, pill.X + S(18) + S(5), pill.Y + pill.Height / 2, S(10), Theme.Fade(v.Dot, a));
-                using (var b1 = new SolidBrush(Theme.Fade(Theme.Text1, a)))
-                using (var b2 = new SolidBrush(Theme.Fade(Color.FromArgb(180, 180, 187), a)))
-                {
-                    g.DrawString(v.Title, fonts.IslandTitle, b1, new RectangleF(tx, pill.Y + S(11), tw, S(22)), fmt);
-                    g.DrawString(v.Sub, fonts.IslandSub, b2, new RectangleF(tx, pill.Y + S(33), tw, S(20)), fmt);
-                }
+                Say(v.Title, fonts.IslandTitle, Theme.Fade(Theme.Text1, a), new RectangleF(tx, pill.Y + S(11), tw, S(22)), fmt);
+                Say(v.Sub, fonts.IslandSub, Theme.Fade(Theme.Text2, a), new RectangleF(tx, pill.Y + S(33), tw, S(20)), fmt);
             }
             else
             {
@@ -438,46 +448,49 @@ namespace HdrSwitch
                     roll.Draw(tx, y, lineH, (ch, gx, gy, ga, smear) =>
                     {
                         // The trailing copy stands in for motion blur, which GDI+ can't do cheaply.
-                        if (smear != 0)
-                            using (var bs = new SolidBrush(Theme.Fade(Theme.Text1, a * ga * 0.35)))
-                                g.DrawString(ch, fonts.IslandText, bs, gx, gy + smear, glyphFmt);
-                        using (var bg = new SolidBrush(Theme.Fade(Theme.Text1, a * ga)))
-                            g.DrawString(ch, fonts.IslandText, bg, gx, gy, glyphFmt);
+                        if (smear != 0) Say(ch, fonts.IslandText, Theme.Fade(Theme.Text1, a * ga * 0.35), new RectangleF(gx, gy + smear, 0, 0), glyphFmt);
+                        Say(ch, fonts.IslandText, Theme.Fade(Theme.Text1, a * ga), new RectangleF(gx, gy, 0, 0), glyphFmt);
                     });
                 }
-                else
-                    using (var b1 = new SolidBrush(Theme.Fade(Theme.Text1, a)))
-                        g.DrawString(v.Text, fonts.IslandText, b1, new RectangleF(tx, pill.Y, tw, pill.Height), fmt);
+                else Say(v.Text, fonts.IslandText, Theme.Fade(Theme.Text1, a), new RectangleF(tx, pill.Y, tw, pill.Height), fmt);
             }
         }
 
-        /// <summary>A top-down 32-bit DIB that GDI+ draws into directly and UpdateLayeredWindow reads from: no copy per frame.</summary>
+        /// <summary>
+        /// Text with a faint shadow 1 px under it, so it reads on a bright backdrop. An empty box (no width) draws from
+        /// its top-left point.
+        /// </summary>
+        void Say(string s, Font f, Color c, RectangleF r, StringFormat sf)
+        {
+            if (string.IsNullOrEmpty(s) || c.A == 0) return;
+            using (var shadow = new SolidBrush(Color.FromArgb((int)Math.Round(c.A * 0.32), 0, 0, 0)))
+            using (var fg = new SolidBrush(c))
+            {
+                if (r.Width <= 0)
+                {
+                    g.DrawString(s, f, shadow, r.X, r.Y + 1, sf);
+                    g.DrawString(s, f, fg, r.X, r.Y, sf);
+                }
+                else
+                {
+                    g.DrawString(s, f, shadow, new RectangleF(r.X, r.Y + 1, r.Width, r.Height), sf);
+                    g.DrawString(s, f, fg, r, sf);
+                }
+            }
+        }
+
         void CreateSurface()
         {
             FreeSurface();
-            IntPtr bits;
-            var bi = new Native.BitmapInfo { Size = 40, Width = size.Width, Height = -size.Height, Planes = 1, BitCount = 32 };
-            dc = Native.CreateCompatibleDC(IntPtr.Zero);
-            dib = Native.CreateDIBSection(dc, ref bi, 0, out bits, IntPtr.Zero, 0);
-            oldBitmap = Native.SelectObject(dc, dib);
-            surface = new Bitmap(size.Width, size.Height, size.Width * 4, PixelFormat.Format32bppPArgb, bits);
-            g = Graphics.FromImage(surface);
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.PixelOffsetMode = PixelOffsetMode.Half;
-            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;   // ClearType has no meaning on a transparent surface
+            surface = new Glass.Surface(size);
+            g = surface.G;
         }
 
         void FreeSurface()
         {
-            if (g != null) { g.Dispose(); g = null; }
             if (surface != null) { surface.Dispose(); surface = null; }
-            if (dc != IntPtr.Zero)
-            {
-                Native.SelectObject(dc, oldBitmap);
-                Native.DeleteObject(dib);
-                Native.DeleteDC(dc);
-                dc = dib = oldBitmap = IntPtr.Zero;
-            }
+            g = null;
+            shape = null;
         }
 
         protected override void Dispose(bool disposing)

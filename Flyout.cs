@@ -1,11 +1,11 @@
-// The panel that opens from the tray icon. Drawn by hand in the same look as the island (Theme.cs): near-black,
-// borderless cards with soft corners, capsule buttons, sliding switches, amber for HDR and nothing else.
+// The panel that opens from the tray icon. Drawn by hand in the same look as the island: liquid glass (Glass.cs)
+// with soft cards on it, capsule buttons, sliding switches, white glass for what is on, amber for HDR and nothing else.
 // Nothing here changes any state itself – every click calls back into TrayApp and rebuilds the view.
 //
-// It stays an ordinary window, not a layered one like the island: that keeps ClearType text and the system's
-// shadow and rounded corners on Windows 11 (Windows 10 gets square corners and a hairline, like its own flyouts).
-// The price is that the window's own corner radius is Windows' and that it can slide and fade, but not scale.
-// No backdrop material either: Mica needs the client area on glass, where GDI text loses its alpha.
+// Like the island it is a layered window drawn through UpdateLayeredWindow: per-pixel alpha, so the glass shows the
+// blurred desktop and its corners are its own. Its region is its rounded shape, which keeps the blur inside it. The
+// price: no ClearType (grey anti-aliasing on glass) and no system shadow. Invalidate() still works as usual: it
+// queues one Render for the next message, which paints the whole surface and hands it to Windows.
 
 using System;
 using System.Collections.Generic;
@@ -64,7 +64,9 @@ namespace HdrSwitch
             readonly Dictionary<string, RollText> rolls = new Dictionary<string, RollText>();   // text that rolls when it changes, by key
             readonly TextFormatFlags TfLeft, TfCenter, TfCaption, TfWrap;   // TfCaption: right-aligned, never shortened
             Rectangle listClip;
-            Bitmap listBmp;   // the list is painted through it; kept while the flyout is open
+            Glass.Surface surface;   // what UpdateLayeredWindow shows; kept while the flyout is open
+            bool queued, blurOn;
+            double fade = 1;         // the window's alpha: 0 → 1 as it opens
             int scroll, scrollMax, rowH;
             int hover = -1, pressed = -1;
             bool picking;     // the list shows running programs to add, instead of the games
@@ -86,7 +88,7 @@ namespace HdrSwitch
                 ShowInTaskbar = false;
                 TopMost = true;
                 StartPosition = FormStartPosition.Manual;
-                BackColor = Theme.Bg;
+                BackColor = Theme.Solid;
                 Text = "Display Switch";
                 SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
 
@@ -117,6 +119,7 @@ namespace HdrSwitch
                 choosing = null;
                 stretching = false;
                 Motion.Refresh();
+                Glass.Refresh();
                 float scale = Theme.Scale(Cursor.Position);
                 if (fonts == null || scale != k)
                 {
@@ -136,6 +139,7 @@ namespace HdrSwitch
                 open.To(1);
                 Place();
                 if (!wasVisible) Show();
+                Render();
                 Activate();
                 Native.SetForegroundWindow(Handle);
                 Motion.Run(tick);
@@ -163,7 +167,8 @@ namespace HdrSwitch
                 hover = pressed = -1;
                 foreach (var a in anims.Values) { a.Hover.Snap(0); a.Press.Snap(0); }
                 thumbRest.Stop();
-                if (listBmp != null) { listBmp.Dispose(); listBmp = null; }
+                if (surface != null) { surface.Dispose(); surface = null; }
+                Glass.ClearText();
                 Trim();
             }
 
@@ -173,8 +178,7 @@ namespace HdrSwitch
                 double o = Math.Max(0, Math.Min(1, open.Value));
                 var p = new Point(final.X + (int)Math.Round(slide.X * (1 - o)), final.Y + (int)Math.Round(slide.Y * (1 - o)));
                 if (Location != p) Location = p;
-                double opacity = Math.Min(1, o * 1.5);
-                if (Opacity != opacity) Opacity = opacity;
+                fade = Math.Min(1, o * 1.5);
             }
 
             /// <summary>One frame of motion: the window, the list's scrolling and every item's hover, press and on/off.</summary>
@@ -223,17 +227,7 @@ namespace HdrSwitch
 
             protected override CreateParams CreateParams
             {
-                get { var cp = base.CreateParams; cp.ExStyle |= 0x80; return cp; }   // WS_EX_TOOLWINDOW: no Alt+Tab entry
-            }
-
-            protected override void OnHandleCreated(EventArgs e)
-            {
-                base.OnHandleCreated(e);
-                int v = 2; Native.DwmSetWindowAttribute(Handle, 33, ref v, 4);   // DWMWA_WINDOW_CORNER_PREFERENCE = round
-                v = 1; Native.DwmSetWindowAttribute(Handle, 20, ref v, 4);       // DWMWA_USE_IMMERSIVE_DARK_MODE
-                Color line = Theme.GlassLineFlat;
-                v = line.R | (line.G << 8) | (line.B << 16);
-                Native.DwmSetWindowAttribute(Handle, 34, ref v, 4);              // DWMWA_BORDER_COLOR
+                get { var cp = base.CreateParams; cp.ExStyle |= 0x80 | 0x80000; return cp; }   // WS_EX_TOOLWINDOW: no Alt+Tab entry; WS_EX_LAYERED
             }
 
             protected override void OnDeactivate(EventArgs e)
@@ -254,7 +248,7 @@ namespace HdrSwitch
                 {
                     thumbRest.Dispose();
                     tip.Dispose();
-                    if (listBmp != null) listBmp.Dispose();
+                    if (surface != null) surface.Dispose();
                     if (fonts != null) fonts.Dispose();
                 }
                 base.Dispose(disposing);
@@ -294,12 +288,11 @@ namespace HdrSwitch
                 RollText titleRoll = Roll("title", title, fonts.Title), subRoll = Roll("sub", sub, fonts.Caption);
                 items.Add(new Item { Rect = c1, Key = "status", On = on, Paint = (g, rc, lk) =>
                 {
-                    Theme.Fill(g, rc, S(22), Theme.GlassFlat);
-                    Theme.Stroke(g, rc, S(22), Theme.GlassLineFlat);
+                    Glass.Chip(g, rc, S(20), Theme.Chip);
                     Theme.Dot(g, rc.X + CP + S(9), rc.Y + CP + S(22), S(10), Theme.Mix(Theme.Grey, Theme.Amber, lk.On));
                     int tx = rc.X + CP + S(30), tw = rc.Right - CP - S(36) - S(12) - tx;
-                    DrawRoll(g, titleRoll, fonts.Title, Theme.Text1, Theme.GlassFlat, new Rectangle(tx, rc.Y + CP - S(1), tw, S(26)), -1);
-                    DrawRoll(g, subRoll, fonts.Caption, Theme.Text2, Theme.GlassFlat, new Rectangle(tx, rc.Y + CP + S(26), tw, S(18)), -1);
+                    DrawRoll(g, titleRoll, fonts.Title, Theme.Text1, new Rectangle(tx, rc.Y + CP - S(1), tw, S(26)), -1);
+                    DrawRoll(g, subRoll, fonts.Caption, Theme.Text2, new Rectangle(tx, rc.Y + CP + S(26), tw, S(18)), -1);
                     Theme.Badge(g, new RectangleF(rc.Right - CP - S(36), rc.Y + CP + S(4), S(36), S(36)), lk.On);
                     if (notice != null) Draw(g, notice, fonts.Caption, Theme.Text2, new Rectangle(rc.X + CP, rc.Y + noticeY, textW, noticeH), TfWrap);
                     if (error != null) Draw(g, error, fonts.Caption, Theme.Text2, new Rectangle(rc.X + CP, rc.Y + updateY + S(36) + S(8), textW, errorH), TfWrap);
@@ -323,13 +316,14 @@ namespace HdrSwitch
                         {
                             float w = (float)Math.Max(rc.Height, Math.Min(rc.Width, lk.Width));
                             var pill = new RectangleF(rc.X + (rc.Width - w) / 2 + (float)lk.Shake, rc.Y, w, rc.Height);
-                            Color idle = Theme.Mix(Theme.Mix(Color.White, Color.FromArgb(218, 218, 223), lk.Hover), Color.FromArgb(182, 182, 188), lk.Press);
+                            Color idle = Theme.Mix(Theme.Mix(Theme.Lit, Theme.LitHover, lk.Hover), Theme.LitPress, lk.Press);
                             Color fill = Theme.Mix(idle, Theme.Raised, lk.On);
                             Theme.Fill(g, pill, pill.Height / 2f, fill);
+                            Glass.Edge(g, pill, pill.Height / 2f, lk.On);
                             float b = (float)Math.Max(0, Math.Min(1, lk.Busy));
                             float x = pill.X + (pill.Width - (b * (spin + gap) + roll.Width)) / 2;
                             Theme.Spinner(g, new PointF(x + spin / 2f, pill.Y + pill.Height / 2), spin * (0.6f + 0.4f * b), Math.Max(1.5f, 2 * k), Theme.Text1, b);
-                            DrawRollAt(g, roll, fonts.Strong, Theme.Mix(Color.Black, Theme.Text1, lk.On), fill, Rectangle.Round(pill), x + b * (spin + gap));
+                            DrawRollAt(g, roll, fonts.Strong, Theme.Mix(Theme.Ink, Theme.Text1, lk.On), Rectangle.Round(pill), x + b * (spin + gap));
                         }
                     });
                 }
@@ -385,7 +379,7 @@ namespace HdrSwitch
                 int visible = Math.Max(1, Math.Min(6, count));
                 int footH = choosing != null ? S(52) : S(8);
                 var c3 = new Rectangle(M, y, W - 2 * M, headH + visible * rowH + footH);
-                items.Add(new Item { Rect = c3, Paint = (g, rc, lk) => Theme.Fill(g, rc, S(16), Theme.Card) });
+                items.Add(new Item { Rect = c3, Paint = (g, rc, lk) => Glass.Chip(g, rc, S(20), Theme.Chip) });
                 if (picking || choosing != null)
                 {
                     var back = new Rectangle(c3.X + S(8), c3.Y + S(6), S(32), S(32));
@@ -406,7 +400,7 @@ namespace HdrSwitch
                     items.Add(new Item { Rect = c3, Paint = (g, rc, lk) =>
                     {
                         Draw(g, "Games", fonts.Strong, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, gamesW, headH), TfLeft);
-                        DrawRoll(g, onCount, fonts.Caption, Theme.Text3, Theme.Card, new Rectangle(rc.X + CP + gamesW + S(8), rc.Y + S(1), S(100), headH), -1);
+                        DrawRoll(g, onCount, fonts.Caption, Theme.Text3, new Rectangle(rc.X + CP + gamesW + S(8), rc.Y + S(1), S(100), headH), -1);
                     } });
                     // The two things to do with the list sit in its header: scan again, add something by hand.
                     var add = new Rectangle(c3.Right - S(10) - S(30), c3.Y + S(7), S(30), S(30));
@@ -416,9 +410,8 @@ namespace HdrSwitch
                         Click = scanning ? null : (Action)(() => { app.ScanInBackground(true); Rebuild(); }),
                         Paint = (g, rc, lk) =>
                         {
-                            // While it looks, the magnifier gives way to a spinner (GDI text has no alpha: it fades into the fill).
-                            Color fill = Theme.Mix(Theme.Mix(Theme.Raised, Theme.Hover, lk.Hover), Theme.Press, lk.Press);
-                            Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, Theme.Mix(Theme.Text1, fill, lk.Busy));
+                            // While it looks, the magnifier fades out and a spinner takes its place.
+                            Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, Theme.Fade(Theme.Text1, 1 - lk.Busy));
                             Theme.Spinner(g, new PointF(rc.X + rc.Width / 2f, rc.Y + rc.Height / 2f), S(13), Math.Max(1.5f, 1.75f * k), Theme.Text1, lk.Busy);
                         } });
                     items.Add(new Item { Rect = add, Key = "add", Tip = "Add a program", Click = () => { picking = true; ScrollHome(); Rebuild(); },
@@ -522,7 +515,7 @@ namespace HdrSwitch
                         } });
                         // The monitor symbol opens the game's resolution view; white when it has one.
                         items.Add(new Item { Rect = mon, Scrolls = true, Key = "mon:" + name, Tip = "Resolution", Click = () => { choosing = name; stretching = false; ScrollHome(); Rebuild(); },
-                            Paint = (g, rc, lk) => Button(g, rc, lk, Theme.Card, "", fonts.Glyph, prof != null ? Theme.Text1 : Theme.Mix(Theme.Text3, Theme.Text1, lk.Hover)) });
+                            Paint = (g, rc, lk) => Button(g, rc, lk, Theme.None, "", fonts.Glyph, prof != null ? Theme.Text1 : Theme.Mix(Theme.Text3, Theme.Text1, lk.Hover)) });
                     }
                 }
                 if (choosing != null)
@@ -543,6 +536,7 @@ namespace HdrSwitch
                 items.Add(new Item { Rect = exit, Key = "exit", Click = () => app.ExitThread(), Paint = (g, rc, lk) =>
                 {
                     Theme.Fill(g, rc, rc.Height / 2f, Theme.Mix(Theme.Mix(Theme.Raised, Theme.Hover, lk.Hover), Theme.Press, lk.Press));
+                    Glass.Edge(g, rc, rc.Height / 2f, 1);
                     Draw(g, "Exit", fonts.Body, Theme.Text1, rc, TfCenter);
                 } });
                 var edit = new Rectangle(exit.X - S(8) - S(32), y, S(32), S(32));
@@ -551,7 +545,7 @@ namespace HdrSwitch
                 {
                     Dismiss(true);   // at once: Notepad is about to come to the front
                     try { Process.Start("notepad.exe", "\"" + file + "\""); } catch { }
-                }, Paint = (g, rc, lk) => Button(g, rc, lk, Theme.Bg, "", fonts.Glyph, Theme.Mix(Theme.Text2, Theme.Text1, lk.Hover)) });
+                }, Paint = (g, rc, lk) => Button(g, rc, lk, Theme.None, "", fonts.Glyph, Theme.Mix(Theme.Text2, Theme.Text1, lk.Hover)) });
                 y += S(32) + M;
 
                 // The springs follow the new items: kept by key, new ones start where they belong, old ones go.
@@ -640,23 +634,24 @@ namespace HdrSwitch
                 return Math.Abs((long)m.Width * full.Height - (long)m.Height * full.Width) * 100 < (long)full.Width * full.Height;
             }
 
-            /// <summary>A setting as a rounded square: symbol above, name below; white with dark content when it is on.</summary>
+            /// <summary>A setting as a rounded square: symbol above, name below; white glass with dark content when it is on.</summary>
             void AddTile(Rectangle r, string key, string icon, string label, bool on, string tipText, Action click)
             {
                 RollText state = Roll("tile:" + key, on ? "On" : "Off", fonts.Caption);
                 items.Add(new Item { Rect = r, Key = "tile:" + key, On = on, Tip = tipText, Click = click, Paint = (g, rc, lk) =>
                 {
-                    Color rest = Theme.Mix(Theme.Raised, Color.White, lk.On);
-                    Color over = Theme.Mix(Theme.Hover, Color.FromArgb(222, 222, 227), lk.On), down = Theme.Mix(Theme.Press, Color.FromArgb(190, 190, 196), lk.On);
+                    Color rest = Theme.Mix(Theme.Chip, Theme.Lit, lk.On);
+                    Color over = Theme.Mix(Theme.ChipHover, Theme.LitHover, lk.On), down = Theme.Mix(Theme.Press, Theme.LitPress, lk.On);
                     Color fill = Theme.Mix(Theme.Mix(rest, over, lk.Hover), down, lk.Press);
-                    Theme.Fill(g, rc, S(12), fill);
-                    Color fg = Theme.Mix(Theme.Text1, Color.Black, lk.On);
+                    Theme.Fill(g, rc, S(18), fill);
+                    Glass.Edge(g, rc, S(18), 1 - lk.On);
+                    Color fg = Theme.Mix(Theme.Text1, Theme.Ink, lk.On);
                     if (icon != null) Draw(g, icon, fonts.Glyph, fg, new Rectangle(rc.X + S(11), rc.Y + S(11), S(20), S(20)), TfCenter);
                     else   // the island's own symbol: a small pill
                         using (var pen = new Pen(fg, Math.Max(1f, 1.5f * k)))
                         using (var p = Theme.Round(new RectangleF(rc.X + S(12), rc.Y + S(15), S(20), S(11)), S(11) / 2f)) g.DrawPath(pen, p);
                     // The state in words as well: three lit tiles side by side don't say by themselves that lit means on.
-                    DrawRoll(g, state, fonts.Caption, Theme.Mix(Theme.Text2, Color.FromArgb(60, 60, 67), lk.On), fill, new Rectangle(rc.Right - S(12) - S(40), rc.Y + S(11), S(40), S(20)), 1);
+                    DrawRoll(g, state, fonts.Caption, Theme.Mix(Theme.Text2, Theme.InkSoft, lk.On), new Rectangle(rc.Right - S(12) - S(40), rc.Y + S(11), S(40), S(20)), 1);
                     Draw(g, label, fonts.Label, fg, new Rectangle(rc.X + S(12), rc.Bottom - S(10) - S(32), rc.Width - S(20), S(32)),
                         TextFormatFlags.NoPadding | TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.Bottom);
                 } });
@@ -664,38 +659,43 @@ namespace HdrSwitch
 
             // ---- painting ----
 
-            protected override void OnPaint(PaintEventArgs e)
+            protected override void OnInvalidated(InvalidateEventArgs e)
             {
-                if (fonts == null) return;
-                var g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.PixelOffsetMode = PixelOffsetMode.Half;
-                g.Clear(Theme.Bg);
+                base.OnInvalidated(e);
+                if (queued || !IsHandleCreated) return;
+                queued = true;   // one Render for however many Invalidates come before it
+                BeginInvoke((Action)Render);
+            }
+
+            /// <summary>Paints the whole window onto its surface and hands it to Windows, with the blur and the shape.</summary>
+            void Render()
+            {
+                queued = false;
+                if (fonts == null || !IsHandleCreated || ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+                var all = new RectangleF(0, 0, ClientSize.Width, ClientSize.Height);
+                if (surface == null || surface.Size != ClientSize)
+                {
+                    if (surface != null) surface.Dispose();
+                    surface = new Glass.Surface(ClientSize);
+                    using (var p = Theme.Round(all, S(26))) Glass.SetShape(Handle, surface.G, p);
+                }
+                var g = surface.G;
+                g.Clear(Color.Transparent);
+                Glass.Panel(g, all, S(26));
                 for (int i = 0; i < items.Count; i++)
                     if (!items[i].Scrolls) items[i].Paint(g, items[i].Rect, LookOf(i));
-                // The list is painted through its own bitmap: GDI text (TextRenderer) ignores a GDI+ clip,
-                // so this is what keeps a half-scrolled row inside the card.
+                // The list scrolls inside a clip that keeps a half-scrolled row in the card.
                 if (listClip.Width > 0 && listClip.Height > 0)
                 {
-                    if (listBmp == null || listBmp.Size != listClip.Size)
+                    var state = g.Save();
+                    g.SetClip(listClip, CombineMode.Intersect);
+                    for (int i = 0; i < items.Count; i++)
                     {
-                        if (listBmp != null) listBmp.Dispose();
-                        listBmp = new Bitmap(listClip.Width, listClip.Height);
+                        if (!items[i].Scrolls) continue;
+                        var r = OnScreen(items[i]);
+                        if (r.Bottom > listClip.Top && r.Top < listClip.Bottom) items[i].Paint(g, r, LookOf(i));
                     }
-                    using (var lg = Graphics.FromImage(listBmp))
-                    {
-                        lg.SmoothingMode = SmoothingMode.AntiAlias;
-                        lg.PixelOffsetMode = PixelOffsetMode.Half;
-                        lg.Clear(Theme.Card);
-                        for (int i = 0; i < items.Count; i++)
-                        {
-                            if (!items[i].Scrolls) continue;
-                            var r = OnScreen(items[i]);
-                            r.Offset(-listClip.X, -listClip.Y);
-                            if (r.Bottom > 0 && r.Top < listClip.Height) items[i].Paint(lg, r, LookOf(i));
-                        }
-                    }
-                    g.DrawImageUnscaled(listBmp, listClip.Location);
+                    g.Restore(state);
                 }
                 if (scrollMax > 0 && thumb.Value > 0.01)   // a thin bar that is only there while the list moves
                 {
@@ -703,15 +703,12 @@ namespace HdrSwitch
                     int trackH = listClip.Height - S(8);
                     int thumbH = Math.Max(S(24), trackH * listClip.Height / content);
                     float thumbY = listClip.Y + S(4) + (trackH - thumbH) * (float)Math.Max(0, Math.Min(scrollMax, scrollTo.Value)) / scrollMax;
-                    Theme.Fill(g, new RectangleF(listClip.Right - S(5), thumbY, S(3), thumbH), S(3) / 2f, Theme.Fade(Color.FromArgb(150, 150, 156), thumb.Value));
+                    Theme.Fill(g, new RectangleF(listClip.Right - S(5), thumbY, S(3), thumbH), S(3) / 2f, Theme.Fade(Color.FromArgb(150, 255, 255, 255), thumb.Value));
                 }
-                if (!Theme.Win11)   // Windows 10 draws no border around a borderless window
-                    using (var pen = new Pen(Theme.GlassLineFlat))
-                    {
-                        g.SmoothingMode = SmoothingMode.None;
-                        g.PixelOffsetMode = PixelOffsetMode.Default;
-                        g.DrawRectangle(pen, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
-                    }
+                Glass.Rim(g, all, S(26));
+                bool blur = Glass.Transparency && fade >= 0.5;
+                if (blur != blurOn) { Glass.SetBlur(Handle, blur); blurOn = blur; }
+                surface.Present(Handle, Location, fade);
             }
 
             Look LookOf(int i)
@@ -747,20 +744,22 @@ namespace HdrSwitch
             void RowBg(Graphics g, Rectangle rc, Look lk)
             {
                 if (lk.Hover < 0.01) return;
-                Color c = Theme.Mix(Theme.Card, Theme.Mix(Theme.Raised, Theme.Press, lk.Press), lk.Hover);
+                Color c = Theme.Mix(Theme.None, Theme.Mix(Theme.ChipHover, Theme.Press, lk.Press), lk.Hover);
                 Theme.Fill(g, new RectangleF(rc.X + S(8), rc.Y + S(2), rc.Width - S(16), rc.Height - S(4)), S(10), c);
             }
 
             /// <summary>A round button with a symbol. rest: its fill when idle – the colour behind it for one without a fill.</summary>
             void Button(Graphics g, Rectangle rc, Look lk, Color rest, string symbol, Font font, Color fg)
             {
-                Theme.Fill(g, rc, rc.Height / 2f, Theme.Mix(Theme.Mix(rest, Theme.Hover, lk.Hover), Theme.Press, lk.Press));
+                Color fill = Theme.Mix(Theme.Mix(rest, Theme.Hover, lk.Hover), Theme.Press, lk.Press);
+                Theme.Fill(g, rc, rc.Height / 2f, fill);
+                Glass.Edge(g, rc, rc.Height / 2f, fill.A / (double)Theme.Raised.A);
                 Draw(g, symbol, font, fg, rc, TfCenter);
             }
 
             static void Draw(Graphics g, string s, Font f, Color c, Rectangle r, TextFormatFlags flags)
             {
-                TextRenderer.DrawText(g, s, f, r, c, flags);
+                Glass.Text(g, s, f, r, c, flags);
             }
 
             /// <summary>
@@ -782,7 +781,7 @@ namespace HdrSwitch
             }
 
             /// <summary>Rolling text in r: align -1 left, 0 centred, 1 right. At rest and too wide, it is shortened like any other text.</summary>
-            void DrawRoll(Graphics g, RollText rt, Font f, Color fg, Color bg, Rectangle r, int align)
+            void DrawRoll(Graphics g, RollText rt, Font f, Color fg, Rectangle r, int align)
             {
                 float w = rt.Width;
                 if (w > r.Width && !rt.Moving)
@@ -791,16 +790,16 @@ namespace HdrSwitch
                     return;
                 }
                 float x = align < 0 ? r.X : align > 0 ? r.Right - w : r.X + (r.Width - w) / 2;
-                DrawRollAt(g, rt, f, fg, bg, r, x);
+                DrawRollAt(g, rt, f, fg, r, x);
             }
 
             /// <summary>
-            /// Rolling text from x, centred on clip's height and kept inside it. bg is the colour behind it: GDI text has
-            /// no alpha, so a character that fades is mixed towards it, and its trailing copy (the motion blur) more so.
+            /// Rolling text from x, centred on clip's height and kept inside it. A character fades as it rolls, and its
+            /// trailing copy (the motion blur) is fainter still.
             /// </summary>
-            static void DrawRollAt(Graphics g, RollText rt, Font f, Color fg, Color bg, Rectangle clip, float x)
+            static void DrawRollAt(Graphics g, RollText rt, Font f, Color fg, Rectangle clip, float x)
             {
-                const TextFormatFlags F = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.PreserveGraphicsClipping;
+                const TextFormatFlags F = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
                 int lineH = f.Height;
                 float y = clip.Y + (clip.Height - lineH) / 2f;
                 var state = g.Save();
@@ -808,8 +807,8 @@ namespace HdrSwitch
                 rt.Draw(x, y, lineH, (ch, gx, gy, alpha, smear) =>
                 {
                     var at = new Point((int)Math.Round(gx), (int)Math.Round(gy));
-                    if (smear != 0) TextRenderer.DrawText(g, ch, f, new Point(at.X, at.Y + (int)Math.Round(smear)), Theme.Mix(bg, fg, alpha * 0.35), F);
-                    TextRenderer.DrawText(g, ch, f, at, Theme.Mix(bg, fg, alpha), F);
+                    if (smear != 0) Glass.TextAt(g, ch, f, new Point(at.X, at.Y + (int)Math.Round(smear)), Theme.Fade(fg, alpha * 0.35), F);
+                    Glass.TextAt(g, ch, f, at, Theme.Fade(fg, alpha), F);
                 });
                 g.Restore(state);
             }

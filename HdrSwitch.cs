@@ -1837,5 +1837,11 @@ namespace HdrSwitch
         [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
         [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
         [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr hdc);
+
+        // The glass (Glass.cs): the blur behind a window, and the window's shape.
+        [StructLayout(LayoutKind.Sequential)] public struct AccentPolicy { public int AccentState, AccentFlags, GradientColor, AnimationId; }
+        [StructLayout(LayoutKind.Sequential)] public struct CompositionData { public int Attribute; public IntPtr Data; public int Size; }
+        [DllImport("user32.dll")] public static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref CompositionData data);
+        [DllImport("user32.dll")] public static extern int SetWindowRgn(IntPtr hwnd, IntPtr hrgn, bool redraw);
     }
 }
