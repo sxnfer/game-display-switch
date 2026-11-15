@@ -64,6 +64,9 @@ namespace HdrSwitch
         readonly Spring bubble = Motion.Shape(0, 0.004), alpha = Motion.Fade(0), content = Motion.Fade(1);
         readonly Func<double, bool> tick;
         readonly StringFormat fmt = new StringFormat(StringFormat.GenericTypographic) { Trimming = StringTrimming.EllipsisCharacter, LineAlignment = StringAlignment.Center };
+        readonly StringFormat glyphFmt = new StringFormat(StringFormat.GenericTypographic);   // one character of rolling text, from its top-left
+        readonly Dictionary<string, float> glyphW = new Dictionary<string, float>();
+        RollText roll;   // the compact text: one compact message turning into the next rolls instead of crossfading
 
         float k = 1;
         Theme.Fonts fonts;
@@ -90,6 +93,7 @@ namespace HdrSwitch
             StartPosition = FormStartPosition.Manual;
             Text = "Display Switch";
             fmt.FormatFlags |= StringFormatFlags.NoWrap;
+            glyphFmt.FormatFlags |= StringFormatFlags.NoWrap | StringFormatFlags.MeasureTrailingSpaces;
             tick = Tick;
             life.Tick += (s, e) => Live();
         }
@@ -214,7 +218,12 @@ namespace HdrSwitch
                 drop.Snap(-S(28)); alpha.Snap(0); bubble.Snap(0);
                 prev = null;
             }
-            else prev = leaving ? null : cur;
+            // Compact to compact ("SDR in 3s" → "SDR in 2s" → "SDR"): the text rolls and the pill follows its width.
+            // Anything else – into or out of the expanded shape, a bubble coming or going – crossfades.
+            bool rolls = wasVisible && !leaving && cur != null && !cur.Big && !v.Big && cur.Split == v.Split;
+            if (wasVisible) prev = leaving || rolls ? null : cur;
+            if (rolls) roll.Set(v.Text);
+            else roll.Snap(v.Text);
             cur = v;
             leaving = false;
             w.To(tw); h.To(th); r.To(tr); drop.To(0); alpha.To(1);
@@ -257,7 +266,7 @@ namespace HdrSwitch
         bool Tick(double dt)
         {
             if (!Visible) return false;
-            bool moving = w.Step(dt) | h.Step(dt) | r.Step(dt) | drop.Step(dt) | bubble.Step(dt) | alpha.Step(dt) | content.Step(dt);
+            bool moving = w.Step(dt) | h.Step(dt) | r.Step(dt) | drop.Step(dt) | bubble.Step(dt) | alpha.Step(dt) | content.Step(dt) | roll.Step(dt);
             if (leaving && alpha.Value < 0.02) { Vanish(); return false; }
             Render();
             return moving;
@@ -325,7 +334,10 @@ namespace HdrSwitch
                 if (fonts != null) fonts.Dispose();
                 k = scale;
                 fonts = new Theme.Fonts(k);
+                glyphW.Clear();
+                roll = null;
             }
+            if (roll == null) roll = new RollText(GlyphWidth);
             var s = new Size(Math.Min(b.Width, S(540)), S(10) + S(64) + S(12));
             Bounds = new Rectangle(b.X + (b.Width - s.Width) / 2, Math.Max(b.Top, scr.WorkingArea.Top), s.Width, s.Height);
             if (s != size || surface == null)
@@ -354,6 +366,19 @@ namespace HdrSwitch
         }
 
         float TextWidth(string s, Font f) { return (float)Math.Ceiling(g.MeasureString(s ?? "", f, 100000, fmt).Width) + 1; }
+
+        /// <summary>One character's advance in the compact font, for the rolling text.</summary>
+        float GlyphWidth(string ch)
+        {
+            float wd;
+            if (string.IsNullOrEmpty(ch) || g == null) return 0;
+            if (!glyphW.TryGetValue(ch, out wd))
+            {
+                wd = g.MeasureString(ch, fonts.IslandText, 100000, glyphFmt).Width;
+                glyphW[ch] = wd;
+            }
+            return wd;
+        }
 
         void Render()
         {
@@ -407,8 +432,22 @@ namespace HdrSwitch
             {
                 float tx = pill.X + S(12) + S(8) + S(8), tw = pill.Right - S(14) - tx;
                 Theme.Dot(g, pill.X + S(12) + S(4), pill.Y + pill.Height / 2, S(8), Theme.Fade(v.Dot, a));
-                using (var b1 = new SolidBrush(Theme.Fade(Theme.Text1, a)))
-                    g.DrawString(v.Text, fonts.IslandText, b1, new RectangleF(tx, pill.Y, tw, pill.Height), fmt);
+                if (v == cur && (roll.Moving || roll.TargetWidth <= tw))
+                {
+                    float lineH = fonts.IslandText.Height, y = pill.Y + (pill.Height - lineH) / 2;
+                    roll.Draw(tx, y, lineH, (ch, gx, gy, ga, smear) =>
+                    {
+                        // The trailing copy stands in for motion blur, which GDI+ can't do cheaply.
+                        if (smear != 0)
+                            using (var bs = new SolidBrush(Theme.Fade(Theme.Text1, a * ga * 0.35)))
+                                g.DrawString(ch, fonts.IslandText, bs, gx, gy + smear, glyphFmt);
+                        using (var bg = new SolidBrush(Theme.Fade(Theme.Text1, a * ga)))
+                            g.DrawString(ch, fonts.IslandText, bg, gx, gy, glyphFmt);
+                    });
+                }
+                else
+                    using (var b1 = new SolidBrush(Theme.Fade(Theme.Text1, a)))
+                        g.DrawString(v.Text, fonts.IslandText, b1, new RectangleF(tx, pill.Y, tw, pill.Height), fmt);
             }
         }
 
@@ -449,6 +488,7 @@ namespace HdrSwitch
                 FreeSurface();
                 if (fonts != null) fonts.Dispose();
                 fmt.Dispose();
+                glyphFmt.Dispose();
             }
             base.Dispose(disposing);
         }

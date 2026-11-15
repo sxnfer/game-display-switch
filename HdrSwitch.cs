@@ -126,7 +126,10 @@ namespace HdrSwitch
         string notice;            // the latest setup hint, kept in the flyout's status card until things settle
         Updater.Release update;   // a newer release, once found
         bool updating;
+        string updateStep;        // while updating: the step under way, shown on the update button
         string updateError;       // why the last update didn't install
+        const string UpdateFailed = "Update failed";
+        const int StepMs = 700;   // each update step stays on the button at least this long
 
         // Recording apps (process name → name shown). An HDR game captured into an SDR recording comes out washed out,
         // so with "SDR while recording" on, nothing switches HDR on while one of these runs.
@@ -234,20 +237,42 @@ namespace HdrSwitch
             if (update == null || updating) return;
             updating = true;
             updateError = null;
+            updateStep = "Downloading";
             flyout.Sync();
             var r = update;
             new Thread(() =>
             {
+                // The button rolls through the steps. Each stays up for a moment: the download is about 120 KB, and a
+                // label that flashes past says nothing. null only waits out the step that is showing.
+                var shown = Stopwatch.StartNew();
+                Action<string> step = s =>
+                {
+                    int wait = StepMs - (int)shown.ElapsedMilliseconds;
+                    if (wait > 0) Thread.Sleep(wait);
+                    shown.Restart();
+                    if (s != null) ui.Post(_ => { updateStep = s; flyout.Sync(); }, null);
+                };
                 string error = null;
-                try { Updater.Install(r); }
+                try { Updater.Install(r, step); }
                 catch (Exception e) { error = e.Message; }
+                step(null);   // what shows stays up for its moment too: "Restarting" (the new copy waits for this one to exit), or the step that failed
                 ui.Post(_ =>
                 {
                     if (error == null) { ExitThread(); return; }   // the new version is starting
-                    updating = false;
-                    updateError = error;   // the flyout shows the reason under the update button
+                    // The button says so for a moment before it opens up again with the reason underneath.
+                    updateStep = UpdateFailed;
                     flyout.Sync();
                     Announce(new Island.Act { Id = "update", Text = "Update failed", Dot = Theme.Rec, Balloon = "Update failed: " + error });
+                    var back = new System.Windows.Forms.Timer { Interval = 1400 };
+                    back.Tick += (s2, e2) =>
+                    {
+                        back.Dispose();
+                        updating = false;
+                        updateStep = null;
+                        updateError = error;   // the flyout shows the reason under the update button
+                        flyout.Sync();
+                    };
+                    back.Start();
                 }, null);
             }) { IsBackground = true }.Start();
         }
@@ -1238,8 +1263,11 @@ namespace HdrSwitch
             return r.ExeUrl != null && r.SumsUrl != null ? r : null;
         }
 
-        /// <summary>Downloads, checks and swaps in the new exe, then starts it. Throws with a short reason on failure.</summary>
-        public static void Install(Release r)
+        /// <summary>
+        /// Downloads, checks and swaps in the new exe, then starts it. Throws with a short reason on failure.
+        /// step: told when it moves on to the next step ("Verifying", "Restarting"), for the update button.
+        /// </summary>
+        public static void Install(Release r, Action<string> step)
         {
             string exe = Application.ExecutablePath;
             string dir = Path.GetDirectoryName(exe);
@@ -1252,6 +1280,7 @@ namespace HdrSwitch
                 sums = web.DownloadString(r.SumsUrl);
                 bytes = web.DownloadData(r.ExeUrl);
             }
+            step("Verifying");
 
             var line = sums.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.EndsWith(" " + ExeName) || l.EndsWith("*" + ExeName));
             if (line == null) throw new Exception("the release has no checksum for " + ExeName + ".");
@@ -1274,6 +1303,7 @@ namespace HdrSwitch
             try { File.Move(fresh, exe); }
             catch { File.Move(old, exe); throw; }   // put the running version back
 
+            step("Restarting");
             Process.Start(new ProcessStartInfo(exe, "--updated") { UseShellExecute = false, WorkingDirectory = dir });
         }
 

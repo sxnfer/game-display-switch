@@ -19,7 +19,7 @@ Click the icon (left or right button) and a small panel slides in by the taskbar
 
 | | |
 |---|---|
-| **Status** | `HDR on` with the game's name, `Waiting for a game`, or `No HDR display`, with an amber dot while HDR is on. A setup hint (for example about a missing resolution) stays here until the game closes. An **Update to …** button appears here when there is one. |
+| **Status** | `HDR on` with the game's name, `Waiting for a game`, or `No HDR display`, with an amber dot while HDR is on. A setup hint (for example about a missing resolution) stays here until the game closes. An **Update to …** button appears here when there is one; while it updates it shows each step: Downloading, Verifying, Restarting. |
 | **Tiles** | **Start with Windows**, **SDR while recording** ([Recording with OBS](recording.md)) and **Island** (see below). A tile is white and says **On** while it is on, dark and **Off** otherwise. |
 | **Games** | Every game it found, each with a switch: amber means HDR turns on for it. Switching one off keeps it listed, so a slip is one click to undo. The two round buttons in the header **look for games** again and **add a program** it missed, from a list of the programs that are running. |
 | **Bottom bar** | The pencil opens `games.txt`, **Exit** quits. |
@@ -38,6 +38,8 @@ When something happens, a small pill drops in at the top-centre of the screen an
 | **Updates and scans** | A new version, a finished update, the games a scan found. |
 
 It never takes focus and has no taskbar or Alt+Tab entry. It doesn't show over a game in exclusive fullscreen, over any other fullscreen window, or in presentation mode: it waits up to 10 seconds for the screen to be free, and what still matters then arrives as an ordinary Windows notification. While a game runs, clicks go straight through it; otherwise resting the mouse on it keeps it there and a click opens the flyout. Longer setup hints (a resolution that has to be created in NVIDIA Control Panel, say) are always ordinary notifications, and stay in the flyout's status card.
+
+Text that changes while you watch rolls to its new value one character at a time: the countdown, the status card, a tile's **On** and **Off**, the number of games that are on. Only what changed moves, so `SDR in 3s` → `SDR in 2s` turns just the digit.
 
 Turn it off with the **Island** tile; everything it would have said then comes as a notification, as in earlier versions. Movement follows the Windows setting **Accessibility › Visual effects › Animation effects**: with that off, the island and the flyout appear and change without animation. `HdrSwitch.exe --island-demo` shows every state in turn without switching anything, also next to a running copy.
 

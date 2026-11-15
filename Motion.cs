@@ -75,6 +75,8 @@ namespace HdrSwitch
         public static Spring Open(double v) { return new Spring(420, 41, v, 0.002); }
         public static void Closing(Spring s) { s.Stiffness = 800; s.Damping = 57; }
         public static void Opening(Spring s) { s.Stiffness = 420; s.Damping = 41; }
+        /// <summary>A character rolling in or out of changing text, in lines (damping ratio 0.88, a hint of overshoot, ~0.3 s).</summary>
+        public static Spring Roll(double v) { return new Spring(520, 40, v, 0.004); }
         /// <summary>The list's scroll position, in pixels (~0.26 s).</summary>
         public static Spring Scroll(double v) { return new Spring(500, 45, v, 0.4); }
 

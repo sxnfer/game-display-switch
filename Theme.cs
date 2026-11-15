@@ -176,6 +176,25 @@ namespace HdrSwitch
             using (var p = H(r)) g.FillPath(b, p);
         }
 
+        static readonly System.Diagnostics.Stopwatch spinClock = System.Diagnostics.Stopwatch.StartNew();
+
+        /// <summary>
+        /// Busy: a faint ring with a quarter arc that turns once every 0.85 s, centred on c, d across. alpha fades it in
+        /// and out. It turns by the clock, so whoever draws it keeps redrawing while it shows.
+        /// </summary>
+        public static void Spinner(Graphics g, PointF c, float d, float stroke, Color fg, double alpha)
+        {
+            if (alpha <= 0.01 || d < 1) return;
+            double turn = spinClock.Elapsed.TotalSeconds / 0.85 % 1;
+            var r = new RectangleF(c.X - d / 2, c.Y - d / 2, d, d);
+            using (var track = new Pen(Fade(fg, 0.2 * alpha), stroke))
+            using (var arc = new Pen(Fade(fg, alpha), stroke) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            {
+                g.DrawEllipse(track, r);
+                g.DrawArc(arc, r, (float)(turn * 360 - 90), 90);
+            }
+        }
+
         /// <summary>The H as three bars, on the 16-unit grid the tray icon uses.</summary>
         static GraphicsPath H(RectangleF r)
         {

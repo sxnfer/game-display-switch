@@ -25,6 +25,9 @@ namespace HdrSwitch
             sealed class Look
             {
                 public double Hover, Press, On;
+                public double Busy;     // 0 → 1: a spinner takes the item's place
+                public double Width;    // a pill that sizes to what it says (Item.Width), in pixels
+                public double Shake;    // a sideways nudge, in pixels: something didn't work
                 public static readonly Look None = new Look();
             }
 
@@ -32,8 +35,9 @@ namespace HdrSwitch
             sealed class Anim
             {
                 public readonly Spring Hover = Motion.Control(0), Press = Motion.Control(0), On = Motion.Thumb(0);
+                public readonly Spring Busy = Motion.Fade(0), Width = Motion.Shape(0, 0.5), Shake = Motion.Shape(0, 0.1);
                 public readonly Look Look = new Look();
-                public bool Seen;
+                public bool Seen, Shaken;
             }
 
             /// <summary>One painted thing: a card, a tile, a row, a button. Click == null: not interactive.</summary>
@@ -46,6 +50,9 @@ namespace HdrSwitch
                 public string Tip;
                 public string Key;     // unique; without one the item never animates
                 public bool On;        // a switch, a lit tile: where Look.On is heading
+                public bool Busy;      // where Look.Busy is heading
+                public float Width;    // where Look.Width is heading (0: not used)
+                public bool Shake;     // gives it a nudge when this turns true
             }
 
             readonly TrayApp app;
@@ -54,6 +61,7 @@ namespace HdrSwitch
             readonly ToolTip tip = new ToolTip { InitialDelay = 600 };
             readonly List<Item> items = new List<Item>();
             readonly Dictionary<string, Anim> anims = new Dictionary<string, Anim>();
+            readonly Dictionary<string, RollText> rolls = new Dictionary<string, RollText>();   // text that rolls when it changes, by key
             readonly TextFormatFlags TfLeft, TfCenter, TfCaption, TfWrap;   // TfCaption: right-aligned, never shortened
             Rectangle listClip;
             Bitmap listBmp;   // the list is painted through it; kept while the flyout is open
@@ -115,6 +123,7 @@ namespace HdrSwitch
                     if (fonts != null) fonts.Dispose();
                     k = scale;
                     fonts = new Theme.Fonts(k);
+                    rolls.Clear();   // measured in the old fonts
                 }
                 bool wasVisible = Visible;   // caught while closing: it turns round from where it is
                 closing = false;
@@ -173,7 +182,12 @@ namespace HdrSwitch
             {
                 if (!Visible) return false;
                 bool moving = open.Step(dt) | scrollTo.Step(dt) | thumb.Step(dt);
-                foreach (var a in anims.Values) moving |= a.Hover.Step(dt) | a.Press.Step(dt) | a.On.Step(dt);
+                foreach (var a in anims.Values)
+                {
+                    moving |= a.Hover.Step(dt) | a.Press.Step(dt) | a.On.Step(dt) | a.Busy.Step(dt) | a.Width.Step(dt) | a.Shake.Step(dt);
+                    if (a.Busy.Value > 0.01) moving = true;   // a spinner keeps turning
+                }
+                foreach (var r in rolls.Values) moving |= r.Step(dt);
                 Place();
                 if (closing && !open.Moving) { Finish(); return false; }
                 int s = (int)Math.Round(scrollTo.Value);
@@ -259,6 +273,7 @@ namespace HdrSwitch
             void Rebuild()
             {
                 items.Clear();
+                foreach (var r in rolls.Values) r.Seen = false;
                 int W = S(376), M = S(16), G = S(12), CP = S(16);
                 int y = M;
 
@@ -276,31 +291,45 @@ namespace HdrSwitch
                 int updateY = CP + S(44) + (notice != null ? S(10) + noticeH : 0) + S(14);
                 int h1 = (hasUpdate ? updateY + S(36) + (error != null ? S(8) + errorH : 0) : updateY - S(14)) + CP;
                 var c1 = new Rectangle(M, y, W - 2 * M, h1);
+                RollText titleRoll = Roll("title", title, fonts.Title), subRoll = Roll("sub", sub, fonts.Caption);
                 items.Add(new Item { Rect = c1, Key = "status", On = on, Paint = (g, rc, lk) =>
                 {
                     Theme.Fill(g, rc, S(22), Theme.GlassFlat);
                     Theme.Stroke(g, rc, S(22), Theme.GlassLineFlat);
                     Theme.Dot(g, rc.X + CP + S(9), rc.Y + CP + S(22), S(10), Theme.Mix(Theme.Grey, Theme.Amber, lk.On));
                     int tx = rc.X + CP + S(30), tw = rc.Right - CP - S(36) - S(12) - tx;
-                    Draw(g, title, fonts.Title, Theme.Text1, new Rectangle(tx, rc.Y + CP - S(1), tw, S(26)), TfLeft);
-                    Draw(g, sub, fonts.Caption, Theme.Text2, new Rectangle(tx, rc.Y + CP + S(26), tw, S(18)), TfLeft);
+                    DrawRoll(g, titleRoll, fonts.Title, Theme.Text1, Theme.GlassFlat, new Rectangle(tx, rc.Y + CP - S(1), tw, S(26)), -1);
+                    DrawRoll(g, subRoll, fonts.Caption, Theme.Text2, Theme.GlassFlat, new Rectangle(tx, rc.Y + CP + S(26), tw, S(18)), -1);
                     Theme.Badge(g, new RectangleF(rc.Right - CP - S(36), rc.Y + CP + S(4), S(36), S(36)), lk.On);
                     if (notice != null) Draw(g, notice, fonts.Caption, Theme.Text2, new Rectangle(rc.X + CP, rc.Y + noticeY, textW, noticeH), TfWrap);
                     if (error != null) Draw(g, error, fonts.Caption, Theme.Text2, new Rectangle(rc.X + CP, rc.Y + updateY + S(36) + S(8), textW, errorH), TfWrap);
                 } });
                 if (hasUpdate)
                 {
-                    bool busy = app.updating;
-                    string label = busy ? "Updating…" : "Update to " + app.update.VersionText;
+                    // White and full-width while it waits for a click. Once clicked it turns dark and shrinks around a
+                    // spinner, its label rolling through the steps of the update; a failure says so with a nudge, then
+                    // it opens up again with the reason underneath.
+                    bool busy = app.updating, failed = app.updateStep == UpdateFailed;
+                    string label = busy ? app.updateStep ?? "Downloading" : "Update to " + app.update.VersionText;
+                    var ur = new Rectangle(c1.X + CP, c1.Y + updateY, c1.Width - 2 * CP, S(36));
+                    RollText roll = Roll("update", label, fonts.Strong);
+                    int spin = S(16), gap = S(8);
+                    float fit = !busy ? ur.Width : (failed ? S(18) : S(12) + spin + gap) + roll.TargetWidth + S(18);
                     items.Add(new Item
                     {
-                        Rect = new Rectangle(c1.X + CP, c1.Y + updateY, c1.Width - 2 * CP, S(36)), Key = "update",
+                        Rect = ur, Key = "update", On = busy, Busy = busy && !failed, Width = Math.Min(ur.Width, fit), Shake = failed,
                         Click = busy ? null : (Action)(() => { app.InstallUpdate(); Rebuild(); }),
                         Paint = (g, rc, lk) =>
                         {
-                            Color fill = busy ? Theme.Raised : Theme.Mix(Theme.Mix(Color.White, Color.FromArgb(218, 218, 223), lk.Hover), Color.FromArgb(182, 182, 188), lk.Press);
-                            Theme.Fill(g, rc, rc.Height / 2f, fill);
-                            Draw(g, label, fonts.Strong, busy ? Theme.Disabled : Color.Black, rc, TfCenter);
+                            float w = (float)Math.Max(rc.Height, Math.Min(rc.Width, lk.Width));
+                            var pill = new RectangleF(rc.X + (rc.Width - w) / 2 + (float)lk.Shake, rc.Y, w, rc.Height);
+                            Color idle = Theme.Mix(Theme.Mix(Color.White, Color.FromArgb(218, 218, 223), lk.Hover), Color.FromArgb(182, 182, 188), lk.Press);
+                            Color fill = Theme.Mix(idle, Theme.Raised, lk.On);
+                            Theme.Fill(g, pill, pill.Height / 2f, fill);
+                            float b = (float)Math.Max(0, Math.Min(1, lk.Busy));
+                            float x = pill.X + (pill.Width - (b * (spin + gap) + roll.Width)) / 2;
+                            Theme.Spinner(g, new PointF(x + spin / 2f, pill.Y + pill.Height / 2), spin * (0.6f + 0.4f * b), Math.Max(1.5f, 2 * k), Theme.Text1, b);
+                            DrawRollAt(g, roll, fonts.Strong, Theme.Mix(Color.Black, Theme.Text1, lk.On), fill, Rectangle.Round(pill), x + b * (spin + gap));
                         }
                     });
                 }
@@ -372,19 +401,26 @@ namespace HdrSwitch
                 }
                 else
                 {
-                    string onCount = app.games.Count + " on";
+                    RollText onCount = Roll("count", app.games.Count + " on", fonts.Caption);
                     int gamesW = TextRenderer.MeasureText("Games", fonts.Strong, Size.Empty, TfLeft).Width + S(6);   // measured a little short for semibold
                     items.Add(new Item { Rect = c3, Paint = (g, rc, lk) =>
                     {
                         Draw(g, "Games", fonts.Strong, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, gamesW, headH), TfLeft);
-                        Draw(g, onCount, fonts.Caption, Theme.Text3, new Rectangle(rc.X + CP + gamesW + S(8), rc.Y + S(1), S(100), headH), TfLeft);
+                        DrawRoll(g, onCount, fonts.Caption, Theme.Text3, Theme.Card, new Rectangle(rc.X + CP + gamesW + S(8), rc.Y + S(1), S(100), headH), -1);
                     } });
                     // The two things to do with the list sit in its header: scan again, add something by hand.
                     var add = new Rectangle(c3.Right - S(10) - S(30), c3.Y + S(7), S(30), S(30));
                     var look = new Rectangle(add.X - S(6) - S(30), add.Y, S(30), S(30));
                     bool scanning = app.scanning;
-                    items.Add(new Item { Rect = look, Key = "look", Tip = "Look for games", Click = scanning ? null : (Action)(() => { app.ScanInBackground(true); Rebuild(); }),
-                        Paint = (g, rc, lk) => Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, scanning ? Theme.Disabled : Theme.Text1) });
+                    items.Add(new Item { Rect = look, Key = "look", Tip = scanning ? "Looking for games…" : "Look for games", Busy = scanning,
+                        Click = scanning ? null : (Action)(() => { app.ScanInBackground(true); Rebuild(); }),
+                        Paint = (g, rc, lk) =>
+                        {
+                            // While it looks, the magnifier gives way to a spinner (GDI text has no alpha: it fades into the fill).
+                            Color fill = Theme.Mix(Theme.Mix(Theme.Raised, Theme.Hover, lk.Hover), Theme.Press, lk.Press);
+                            Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, Theme.Mix(Theme.Text1, fill, lk.Busy));
+                            Theme.Spinner(g, new PointF(rc.X + rc.Width / 2f, rc.Y + rc.Height / 2f), S(13), Math.Max(1.5f, 1.75f * k), Theme.Text1, lk.Busy);
+                        } });
                     items.Add(new Item { Rect = add, Key = "add", Tip = "Add a program", Click = () => { picking = true; ScrollHome(); Rebuild(); },
                         Paint = (g, rc, lk) => Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, Theme.Text1) });
                 }
@@ -524,17 +560,26 @@ namespace HdrSwitch
                 {
                     if (it.Key == null) continue;
                     Anim a;
-                    if (!anims.TryGetValue(it.Key, out a))
-                    {
-                        a = new Anim();
-                        a.On.Snap(it.On ? 1 : 0);
-                        anims[it.Key] = a;
-                    }
+                    bool fresh = !anims.TryGetValue(it.Key, out a);
+                    if (fresh) anims[it.Key] = a = new Anim();
                     a.Seen = true;
-                    if (Visible) a.On.To(it.On ? 1 : 0);
-                    else a.On.Snap(it.On ? 1 : 0);
+                    if (Visible && !fresh)
+                    {
+                        a.On.To(it.On ? 1 : 0);
+                        a.Busy.To(it.Busy ? 1 : 0);
+                        a.Width.To(it.Width);
+                        if (it.Shake && !a.Shaken && !Motion.Reduced) a.Shake.Velocity = 520 * k;   // the Shape spring brings it back with a wobble
+                    }
+                    else
+                    {
+                        a.On.Snap(it.On ? 1 : 0);
+                        a.Busy.Snap(it.Busy ? 1 : 0);
+                        a.Width.Snap(it.Width);
+                    }
+                    a.Shaken = it.Shake;
                 }
                 foreach (string gone in anims.Where(kv => !kv.Value.Seen).Select(kv => kv.Key).ToList()) anims.Remove(gone);
+                foreach (string gone in rolls.Where(kv => !kv.Value.Seen).Select(kv => kv.Key).ToList()) rolls.Remove(gone);
 
                 ClientSize = new Size(W, y);
                 pressed = -1;
@@ -598,18 +643,20 @@ namespace HdrSwitch
             /// <summary>A setting as a rounded square: symbol above, name below; white with dark content when it is on.</summary>
             void AddTile(Rectangle r, string key, string icon, string label, bool on, string tipText, Action click)
             {
+                RollText state = Roll("tile:" + key, on ? "On" : "Off", fonts.Caption);
                 items.Add(new Item { Rect = r, Key = "tile:" + key, On = on, Tip = tipText, Click = click, Paint = (g, rc, lk) =>
                 {
                     Color rest = Theme.Mix(Theme.Raised, Color.White, lk.On);
                     Color over = Theme.Mix(Theme.Hover, Color.FromArgb(222, 222, 227), lk.On), down = Theme.Mix(Theme.Press, Color.FromArgb(190, 190, 196), lk.On);
-                    Theme.Fill(g, rc, S(12), Theme.Mix(Theme.Mix(rest, over, lk.Hover), down, lk.Press));
+                    Color fill = Theme.Mix(Theme.Mix(rest, over, lk.Hover), down, lk.Press);
+                    Theme.Fill(g, rc, S(12), fill);
                     Color fg = Theme.Mix(Theme.Text1, Color.Black, lk.On);
                     if (icon != null) Draw(g, icon, fonts.Glyph, fg, new Rectangle(rc.X + S(11), rc.Y + S(11), S(20), S(20)), TfCenter);
                     else   // the island's own symbol: a small pill
                         using (var pen = new Pen(fg, Math.Max(1f, 1.5f * k)))
                         using (var p = Theme.Round(new RectangleF(rc.X + S(12), rc.Y + S(15), S(20), S(11)), S(11) / 2f)) g.DrawPath(pen, p);
                     // The state in words as well: three lit tiles side by side don't say by themselves that lit means on.
-                    Draw(g, on ? "On" : "Off", fonts.Caption, Theme.Mix(Theme.Text2, Color.FromArgb(60, 60, 67), lk.On), new Rectangle(rc.Right - S(12) - S(40), rc.Y + S(11), S(40), S(20)), TfCaption);
+                    DrawRoll(g, state, fonts.Caption, Theme.Mix(Theme.Text2, Color.FromArgb(60, 60, 67), lk.On), fill, new Rectangle(rc.Right - S(12) - S(40), rc.Y + S(11), S(40), S(20)), 1);
                     Draw(g, label, fonts.Label, fg, new Rectangle(rc.X + S(12), rc.Bottom - S(10) - S(32), rc.Width - S(20), S(32)),
                         TextFormatFlags.NoPadding | TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.Bottom);
                 } });
@@ -674,6 +721,9 @@ namespace HdrSwitch
                 a.Look.Hover = a.Hover.Value;
                 a.Look.Press = a.Press.Value;
                 a.Look.On = a.On.Value;
+                a.Look.Busy = a.Busy.Value;
+                a.Look.Width = a.Width.Value;
+                a.Look.Shake = a.Shake.Value;
                 return a.Look;
             }
 
@@ -711,6 +761,57 @@ namespace HdrSwitch
             static void Draw(Graphics g, string s, Font f, Color c, Rectangle r, TextFormatFlags flags)
             {
                 TextRenderer.DrawText(g, s, f, r, c, flags);
+            }
+
+            /// <summary>
+            /// The text under this key, rolling to its new value when it differs from the last rebuild's (Roll.cs).
+            /// Only while the flyout is open: it always opens on what is true now, without replaying what changed.
+            /// </summary>
+            RollText Roll(string key, string text, Font font)
+            {
+                RollText r;
+                if (!rolls.TryGetValue(key, out r))
+                {
+                    rolls[key] = r = new RollText(RollText.Gdi(font));
+                    r.Snap(text);
+                }
+                else if (Visible && !closing) r.Set(text);
+                else r.Snap(text);
+                r.Seen = true;
+                return r;
+            }
+
+            /// <summary>Rolling text in r: align -1 left, 0 centred, 1 right. At rest and too wide, it is shortened like any other text.</summary>
+            void DrawRoll(Graphics g, RollText rt, Font f, Color fg, Color bg, Rectangle r, int align)
+            {
+                float w = rt.Width;
+                if (w > r.Width && !rt.Moving)
+                {
+                    Draw(g, rt.Text, f, fg, r, align < 0 ? TfLeft : align > 0 ? TfLeft | TextFormatFlags.Right : TfCenter);
+                    return;
+                }
+                float x = align < 0 ? r.X : align > 0 ? r.Right - w : r.X + (r.Width - w) / 2;
+                DrawRollAt(g, rt, f, fg, bg, r, x);
+            }
+
+            /// <summary>
+            /// Rolling text from x, centred on clip's height and kept inside it. bg is the colour behind it: GDI text has
+            /// no alpha, so a character that fades is mixed towards it, and its trailing copy (the motion blur) more so.
+            /// </summary>
+            static void DrawRollAt(Graphics g, RollText rt, Font f, Color fg, Color bg, Rectangle clip, float x)
+            {
+                const TextFormatFlags F = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.PreserveGraphicsClipping;
+                int lineH = f.Height;
+                float y = clip.Y + (clip.Height - lineH) / 2f;
+                var state = g.Save();
+                g.SetClip(clip, CombineMode.Intersect);
+                rt.Draw(x, y, lineH, (ch, gx, gy, alpha, smear) =>
+                {
+                    var at = new Point((int)Math.Round(gx), (int)Math.Round(gy));
+                    if (smear != 0) TextRenderer.DrawText(g, ch, f, new Point(at.X, at.Y + (int)Math.Round(smear)), Theme.Mix(bg, fg, alpha * 0.35), F);
+                    TextRenderer.DrawText(g, ch, f, at, Theme.Mix(bg, fg, alpha), F);
+                });
+                g.Restore(state);
             }
 
             // ---- mouse ----
