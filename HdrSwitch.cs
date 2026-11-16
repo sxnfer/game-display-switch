@@ -883,7 +883,7 @@ namespace HdrSwitch
         }
 
         // "cs2.exe  2368x1332", "cs2.exe 2368 × 1332 @ 240", "cs2.exe 2368x1332 stretch 1776x1332" (the note after # is already gone)
-        static readonly Regex ProfileLine = new Regex(@"^(.+?)\s+(\d{3,5})\s*[x×]\s*(\d{3,5})(?:\s*@\s*(\d{2,4})(?:\s*hz)?)?"
+        internal static readonly Regex ProfileLine = new Regex(@"^(.+?)\s+(\d{3,5})\s*[x×]\s*(\d{3,5})(?:\s*@\s*(\d{2,4})(?:\s*hz)?)?"
             + @"(?:\s+stretch(?:ed)?\s*:?\s*(\d{3,5})\s*[x×]\s*(\d{3,5}))?$", RegexOptions.IgnoreCase);
 
         /// <summary>A game's profile changed: it gets its one-time notices again.</summary>
@@ -1243,13 +1243,19 @@ namespace HdrSwitch
             string json;
             try { using (var web = Client()) json = web.DownloadString("https://api.github.com/repos/" + Repo + "/releases/latest"); }
             catch (System.Net.WebException) { using (var web = Client()) json = web.DownloadString("https://api.github.com/repos/" + OldRepo + "/releases/latest"); }
+            return Parse(json, Current);
+        }
+
+        /// <summary>The release in GitHub's JSON if it is newer than current and has both files, otherwise null.</summary>
+        internal static Release Parse(string json, Version current)
+        {
             var data = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
 
             Version v;
             string tag = data.ContainsKey("tag_name") ? data["tag_name"] as string : null;
             if (tag == null || !Version.TryParse(tag.TrimStart('v', 'V'), out v)) return null;
             var r = new Release { Version = ThreeParts(v) };
-            if (r.Version <= Current) return null;
+            if (r.Version <= current || !data.ContainsKey("assets")) return null;
 
             foreach (object o in (System.Collections.IEnumerable)data["assets"])
             {
@@ -1282,9 +1288,8 @@ namespace HdrSwitch
             }
             step("Verifying");
 
-            var line = sums.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.EndsWith(" " + ExeName) || l.EndsWith("*" + ExeName));
-            if (line == null) throw new Exception("the release has no checksum for " + ExeName + ".");
-            string expected = line.Split(' ')[0].ToLowerInvariant();
+            string expected = ExpectedHash(sums);
+            if (expected == null) throw new Exception("the release has no checksum for " + ExeName + ".");
             string actual;
             using (var sha = System.Security.Cryptography.SHA256.Create())
                 actual = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
@@ -1305,6 +1310,13 @@ namespace HdrSwitch
 
             step("Restarting");
             Process.Start(new ProcessStartInfo(exe, "--updated") { UseShellExecute = false, WorkingDirectory = dir });
+        }
+
+        /// <summary>The SHA256 that SHA256SUMS.txt gives for the exe, in lower case, or null.</summary>
+        internal static string ExpectedHash(string sums)
+        {
+            var line = sums.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.EndsWith(" " + ExeName) || l.EndsWith("*" + ExeName));
+            return line == null ? null : line.Split(' ')[0].ToLowerInvariant();
         }
 
         /// <summary>Removes what an update left behind (the previous exe can only go once it has exited).</summary>
@@ -1607,13 +1619,13 @@ namespace HdrSwitch
             return best;
         }
 
-        static string Vdf(string text, string key)
+        internal static string Vdf(string text, string key)
         {
             var m = Regex.Match(text, "\"" + key + "\"\\s+\"([^\"]*)\"");
             return m.Success ? m.Groups[1].Value : null;
         }
 
-        static string Json(string text, string key)
+        internal static string Json(string text, string key)
         {
             var m = Regex.Match(text, "\"" + key + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
             if (!m.Success) return null;
