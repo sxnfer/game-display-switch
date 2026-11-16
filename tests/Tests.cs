@@ -243,6 +243,35 @@ namespace HdrSwitch.Tests
                 Run.True(!TrayApp.BuiltInRecorders.ContainsKey(n), n + " is not a built-in recorder");
         }
 
+        public static void InstalledAppLabels()
+        {
+            Run.Equal("EA: Battlefield 6", GameScanner.InstalledLabel("Electronic Arts", "Battlefield 6"), "an EA app game");
+            Run.Equal("Battle.net: Diablo IV", GameScanner.InstalledLabel("Blizzard Entertainment", "Diablo IV"), "a Battle.net game");
+            Run.Equal("Riot: VALORANT", GameScanner.InstalledLabel("Riot Games, Inc", "VALORANT"), "a Riot game");
+            Run.Equal("Rockstar: Grand Theft Auto V", GameScanner.InstalledLabel("Rockstar Games", "Grand Theft Auto V "), "a Rockstar game");
+            foreach (var launcher in new[] { new[] { "Electronic Arts", "EA app" }, new[] { "Blizzard Entertainment", "Battle.net" },
+                new[] { "Riot Games, Inc", "Riot Vanguard" }, new[] { "Riot Games, Inc", "Riot Client" }, new[] { "Rockstar Games", "Rockstar Games Launcher" } })
+                Run.Equal<string>(null, GameScanner.InstalledLabel(launcher[0], launcher[1]), launcher[1] + " is a launcher, not a game");
+            Run.Equal<string>(null, GameScanner.InstalledLabel("Microsoft Corporation", "Microsoft Edge"), "another publisher");
+            Run.Equal<string>(null, GameScanner.InstalledLabel(null, "Something"), "no publisher");
+        }
+
+        public static void XboxGamingRoot()
+        {
+            var bytes = new List<byte>(System.Text.Encoding.ASCII.GetBytes("RGBX"));
+            bytes.AddRange(BitConverter.GetBytes(2));
+            bytes.AddRange(System.Text.Encoding.Unicode.GetBytes("\\XboxGames\0\\Games\\Xbox\0"));
+            var roots = GameScanner.GamingRoots(bytes.ToArray());
+            Run.Equal(2, roots.Count, "two folders");
+            if (roots.Count == 2)
+            {
+                Run.Equal("\\XboxGames", roots[0], "first folder");
+                Run.Equal("\\Games\\Xbox", roots[1], "second folder");
+            }
+            Run.Equal(0, GameScanner.GamingRoots(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }).Count, "not a .GamingRoot file");
+            Run.Equal(0, GameScanner.GamingRoots(null).Count, "no file");
+        }
+
         // ---- updates ----
 
         const string ReleaseJson = "{\"tag_name\":\"v1.7.0\",\"assets\":["

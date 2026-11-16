@@ -19,7 +19,7 @@ HDR, resolution and scaling switch when a game starts, and switch back when it c
 | **NVIDIA scaling** | Switched to No scaling while the game runs, restored after. |
 | **Recording** | Stays in SDR while OBS, Streamlabs or another recording app runs. [More](docs/recording.md) |
 
-Finds your games on its own: Steam, Epic, GOG, Ubisoft Connect and game folders on every drive.
+Finds your games on its own: Steam, Epic, GOG, Ubisoft Connect, the EA app, Battle.net, Riot, Rockstar, the Xbox app and game folders on every drive.
 
 ## Get started
 

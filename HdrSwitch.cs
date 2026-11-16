@@ -1,7 +1,7 @@
 // Display Switch (formerly HDR Switch) – a tiny tray app: Windows HDR turns on while a game from your list runs
 // and goes back to SDR a few seconds after it closes.
 //
-// Games are found automatically (Steam, Epic, GOG, Ubisoft and game folders on every drive) and caught
+// Games are found automatically (Steam, Epic, GOG, Ubisoft, EA, Battle.net, Riot, Rockstar, Xbox and game folders on every drive) and caught
 // as soon as their process starts – Steam games even earlier, the moment Play is pressed – so HDR is on
 // before the game checks for it. Only HDR this app turned on is ever switched back off.
 //
@@ -1044,7 +1044,7 @@ namespace HdrSwitch
             var lines = new List<string>
             {
                 "# Display Switch - HDR turns on while one of these runs. One exe per line; text after # is just a note.",
-                "# Games are found automatically (Steam, Epic, GOG, Ubisoft, and game folders on your drives).",
+                "# Games are found automatically (Steam, Epic, GOG, Ubisoft, EA, Battle.net, Riot, Rockstar, Xbox, and game folders on your drives).",
                 "# Missing one? Add its exe on a new line. Changes apply as soon as you save.",
                 "# To stop a game switching HDR, put a - in front of it (deleting the line lets the next scan add it again).",
                 ""
@@ -1474,9 +1474,10 @@ namespace HdrSwitch
     }
 
     /// <summary>
-    /// Finds installed games: launcher libraries first (Steam, Epic, GOG, Ubisoft), then the usual game folders
-    /// on every fixed drive (XboxGames, Games, EA Games, …). For each game folder the largest exe that is not
-    /// a setup / crash reporter / anti-cheat helper is taken as the game.
+    /// Finds installed games: launcher libraries first (Steam, Epic, GOG, Ubisoft), then games that the EA app,
+    /// Battle.net, Riot and Rockstar registered with Windows, the Xbox app's folders, and the usual game folders on
+    /// every fixed drive (Games, EA Games, …). For each game folder the largest exe that is not a setup / crash
+    /// reporter / anti-cheat helper is taken as the game.
     /// </summary>
     public static class GameScanner
     {
@@ -1487,7 +1488,7 @@ namespace HdrSwitch
             "Games", "XboxGames", "GOG Games", "Epic Games", @"Program Files\Epic Games", @"Program Files (x86)\GOG Galaxy\Games",
             @"Program Files\EA Games", @"Program Files (x86)\Origin Games", @"Program Files (x86)\Ubisoft\Ubisoft Game Launcher\games",
             @"Program Files\Rockstar Games", @"SteamLibrary\steamapps\common", @"Program Files (x86)\Steam\steamapps\common",
-            @"Program Files\Steam\steamapps\common"
+            @"Program Files\Steam\steamapps\common", "Riot Games"
         };
 
         // Not games: launcher/overlay tools that would turn HDR on whenever they are in front.
@@ -1503,6 +1504,8 @@ namespace HdrSwitch
             Try(() => Epic(folders, exes));
             Try(() => Gog(folders, exes));
             Try(() => Ubisoft(folders));
+            Try(() => Installed(folders));
+            Try(() => Xbox(folders));
             Try(() => Drives(folders));
 
             var found = new Dictionary<string, Found>();
@@ -1626,6 +1629,97 @@ namespace HdrSwitch
                     }
                 }
             }
+        }
+
+        // Launchers that register their games with Windows' installed apps, by publisher → the label's prefix.
+        static readonly KeyValuePair<string, string>[] Publishers =
+        {
+            new KeyValuePair<string, string>("Electronic Arts", "EA"),
+            new KeyValuePair<string, string>("Blizzard Entertainment", "Battle.net"),
+            new KeyValuePair<string, string>("Riot Games", "Riot"),
+            new KeyValuePair<string, string>("Rockstar Games", "Rockstar"),
+        };
+
+        // The launchers themselves and their helpers, which register under the same publishers.
+        static readonly Regex LauncherApp = new Regex(@"^(EA app|EA Desktop|Origin|Battle\.net|Blizzard Battle\.net|Riot Client|Rockstar Games Launcher|Rockstar Games Social Club|Social Club|Vanguard|Riot Vanguard)\b", RegexOptions.IgnoreCase);
+
+        /// <summary>"EA: Battlefield 6" for a game an EA app, Battle.net, Riot or Rockstar installed – or null: not one of those, or the launcher itself.</summary>
+        internal static string InstalledLabel(string publisher, string name)
+        {
+            if (string.IsNullOrEmpty(publisher) || string.IsNullOrEmpty(name) || LauncherApp.IsMatch(name.Trim())) return null;
+            foreach (var p in Publishers)
+                if (publisher.IndexOf(p.Key, StringComparison.OrdinalIgnoreCase) >= 0) return p.Value + ": " + name.Trim();
+            return null;
+        }
+
+        /// <summary>Games from Windows' list of installed apps (both registry views, and the user's own).</summary>
+        static void Installed(Dictionary<string, string> folders)
+        {
+            const string Uninstall = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+            var roots = new[]
+            {
+                RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64),
+                RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32),
+                RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default),
+            };
+            foreach (var root in roots)
+            {
+                using (root)
+                using (var key = root.OpenSubKey(Uninstall))
+                {
+                    if (key == null) continue;
+                    foreach (string id in key.GetSubKeyNames())
+                    {
+                        Try(() =>
+                        {
+                            using (var g = key.OpenSubKey(id))
+                            {
+                                if (g == null) return;
+                                string label = InstalledLabel(g.GetValue("Publisher") as string, g.GetValue("DisplayName") as string);
+                                string path = g.GetValue("InstallLocation") as string;
+                                if (label != null && !string.IsNullOrEmpty(path)) AddFolder(folders, path.Trim().Trim('"'), label);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// The Xbox app's game folders. Each drive it installs to has a .GamingRoot file at its root naming the folder
+        /// ("XboxGames" unless it was changed); every game is a folder in it, with the game itself under Content.
+        /// </summary>
+        static void Xbox(Dictionary<string, string> folders)
+        {
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                if (drive.DriveType != DriveType.Fixed || !drive.IsReady) continue;
+                string file = Path.Combine(drive.RootDirectory.FullName, ".GamingRoot");
+                if (!File.Exists(file)) continue;
+                foreach (string root in GamingRoots(File.ReadAllBytes(file)))
+                {
+                    string dir = Path.Combine(drive.RootDirectory.FullName, root.TrimStart('\\', '/'));
+                    if (!Directory.Exists(dir)) continue;
+                    foreach (string game in Directory.GetDirectories(dir))
+                    {
+                        string content = Path.Combine(game, "Content");
+                        AddFolder(folders, Directory.Exists(content) ? content : game, "Xbox: " + Path.GetFileName(game));
+                    }
+                }
+            }
+        }
+
+        /// <summary>The folders in a .GamingRoot file: "RGBX", a count, then UTF-16 paths each ending in a 0.</summary>
+        internal static List<string> GamingRoots(byte[] data)
+        {
+            var list = new List<string>();
+            if (data == null || data.Length < 8 || Encoding.ASCII.GetString(data, 0, 4) != "RGBX") return list;
+            foreach (string part in Encoding.Unicode.GetString(data, 8, (data.Length - 8) / 2 * 2).Split('\0'))
+            {
+                string p = part.Trim();
+                if (p.Length > 0 && p.IndexOfAny(Path.GetInvalidPathChars()) < 0 && !list.Contains(p)) list.Add(p);
+            }
+            return list;
         }
 
         static void Drives(Dictionary<string, string> folders)
