@@ -13,6 +13,8 @@ That's it. It finds your games on its own (Steam, Epic, GOG, Ubisoft Connect, th
 
 Needs Windows 10 or 11 and a monitor with HDR available in **Settings › System › Display**. Nothing else to install.
 
+With more than one HDR screen, HDR goes on the screen the game is on. It starts on the screen the game used last time (the main one the first time), and once the game's window is up, a game on another HDR screen gets HDR there while the first goes back to SDR. Other screens are left alone.
+
 ## The flyout
 
 Click the icon (left or right button) and a small panel slides in by the taskbar:

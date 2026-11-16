@@ -302,6 +302,51 @@ namespace HdrSwitch.Tests
             Run.Equal(100, Hdr.LevelOf(250) == 6000 ? 100 : -1, "clamped at 100");
         }
 
+        static Hdr.Display Screen(uint id, bool hdr, bool on)
+        {
+            return new Hdr.Display { Target = id, Gdi = "\\\\.\\DISPLAY" + id, Supported = hdr, On = on };
+        }
+
+        static string Keys(List<Hdr.Display> list) { return string.Join(",", list.Select(d => d.Gdi.Substring(4))); }
+
+        public static void GameScreenMoves()
+        {
+            // HDR came on on the main screen (1) while the game started; its window is on screen 2.
+            var all = new List<Hdr.Display> { Screen(1, true, true), Screen(2, true, false) };
+            List<Hdr.Display> on, off;
+            TrayApp.PlanScreens(new[] { @"\\.\DISPLAY2" }, all, new[] { all[0].Key }, out on, out off);
+            Run.Equal("DISPLAY2", Keys(on), "the game's screen gets HDR");
+            Run.Equal("DISPLAY1", Keys(off), "the main screen goes back to SDR");
+        }
+
+        public static void GameScreenLeavesOthersAlone()
+        {
+            var all = new List<Hdr.Display> { Screen(1, true, true), Screen(2, true, false) };
+            List<Hdr.Display> on, off;
+            TrayApp.PlanScreens(new[] { @"\\.\DISPLAY2" }, all, new string[0], out on, out off);
+            Run.Equal("", Keys(off), "HDR this app didn't turn on stays on");
+
+            TrayApp.PlanScreens(new[] { @"\\.\DISPLAY2", null }, all, new[] { all[0].Key }, out on, out off);
+            Run.Equal("DISPLAY2", Keys(on), "a game with a window moves");
+            Run.Equal("", Keys(off), "but nothing goes off while another game has no window yet");
+
+            TrayApp.PlanScreens(new string[] { null }, all, new[] { all[0].Key }, out on, out off);
+            Run.True(on.Count == 0 && off.Count == 0, "no window yet: nothing changes");
+
+            var sdrOnly = new List<Hdr.Display> { Screen(1, true, true), Screen(2, false, false) };
+            TrayApp.PlanScreens(new[] { @"\\.\DISPLAY2" }, sdrOnly, new[] { sdrOnly[0].Key }, out on, out off);
+            Run.True(on.Count == 0 && off.Count == 0, "a game on a screen without HDR changes nothing");
+        }
+
+        public static void TwoGamesTwoScreens()
+        {
+            var all = new List<Hdr.Display> { Screen(1, true, true), Screen(2, true, false) };
+            List<Hdr.Display> on, off;
+            TrayApp.PlanScreens(new[] { @"\\.\DISPLAY1", @"\\.\DISPLAY2" }, all, new[] { all[0].Key }, out on, out off);
+            Run.Equal("DISPLAY2", Keys(on), "the second screen comes on as well");
+            Run.Equal("", Keys(off), "the first stays on for the other game");
+        }
+
         // ---- updates ----
 
         const string ReleaseJson = "{\"tag_name\":\"v1.7.0\",\"assets\":["

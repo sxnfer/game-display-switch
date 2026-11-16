@@ -177,7 +177,7 @@ namespace HdrSwitch
 
             sdrTimer.Interval = sdrDelay * 1000;
             sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); Settle(); };
-            scanTimer.Tick += (s, e) => { Rescan(); island.Poll(); };
+            scanTimer.Tick += (s, e) => { Rescan(); FollowGameScreens(); island.Poll(); };
             steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); Settle(); };
             reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); LoadRecorders(); LoadBrightness(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
             modeCheck.Tick += (s, e) => { modeCheck.Stop(); OnDisplayChanged(false); };
@@ -327,7 +327,7 @@ namespace HdrSwitch
             steamTimeout.Stop();
             // HDR first, the mode after it: switching HDR makes Windows reapply the saved display mode, which would
             // throw away a competitive mode set just before. A mode change leaves HDR alone.
-            bool hdr = games.Contains(name) && SwitchOn();
+            bool hdr = games.Contains(name) && SwitchOn(name);
             if (hdr && Proc.AgeSeconds(pid) > 5 && hinted.Add(name))
                 Hint("HDR came on after " + DisplayName(name) + " started. If HDR is greyed out in the game, restart it.");
             bool mode = profiles.ContainsKey(name) && ApplyResolution(name);
@@ -397,7 +397,7 @@ namespace HdrSwitch
             if (name == null) return;
             sdrTimer.Stop();
             island.End("sdr");
-            bool hdr = games.Contains(name) && SwitchOn();                  // HDR first – see Track
+            bool hdr = games.Contains(name) && SwitchOn(name);              // HDR first – see Track
             bool mode = profiles.ContainsKey(name) && ApplyResolution(name);
             if (hdr || mode) AnnounceGame(name, hdr);
             steamTimeout.Stop();
@@ -485,17 +485,119 @@ namespace HdrSwitch
 
         // ---- HDR ----
 
-        /// <summary>True if HDR was switched on just now.</summary>
-        bool SwitchOn()
+        /// <summary>
+        /// True if HDR was switched on just now: on the screen the game was on last time, or the main one. game null: the
+        /// first running game from the HDR list.
+        /// </summary>
+        bool SwitchOn(string game = null)
         {
             if (recorder != null || paused) return false;   // SDR while recording, or paused
-            var d = Hdr.Primary();
+            var d = HdrDisplayFor(game ?? running.Values.Select(r => r.Name).FirstOrDefault(games.Contains));
             if (d == null || d.On) return false;   // no HDR display, or HDR already on (not ours to switch back)
             bool ours = InOurMode();
             if (!Hdr.Set(d, true)) return false;
             if (!owned.Any(o => o.Key == d.Key)) owned.Add(d);
             if (ours) KeepMode();   // e.g. an HDR game started while another game has its competitive resolution
             return true;
+        }
+
+        // ---- the game's own screen ----
+        //
+        // HDR goes on the screen a game is on. That screen is only known once its window is up, often seconds after HDR
+        // had to be on, so a game starts with HDR on the screen it used last time (the main one the first time), and once
+        // a second its windows are looked at: a game on another screen that can do HDR gets HDR there, and a screen this
+        // app switched that no running game is on goes back to SDR.
+
+        Dictionary<string, string> screens = ReadScreens();   // game → the screen (\\.\DISPLAY2) it was on last time
+        const string ScreensKey = SettingsKey + @"\Screens";
+
+        /// <summary>The HDR-capable display a game goes on: the one it was on last time, or the main one.</summary>
+        Hdr.Display HdrDisplayFor(string game)
+        {
+            string gdi;
+            if (game != null && screens.TryGetValue(game, out gdi))
+            {
+                var d = Hdr.All().FirstOrDefault(x => x.Gdi == gdi && x.Supported);
+                if (d != null) return d;
+            }
+            return Hdr.Primary();
+        }
+
+        void FollowGameScreens()
+        {
+            if (paused || recorder != null) return;
+            var hdrGames = running.Where(kv => games.Contains(kv.Value.Name)).ToList();
+            if (hdrGames.Count == 0) return;
+            var now = new List<string>();
+            foreach (var kv in hdrGames)
+            {
+                string gdi = Proc.WindowScreen(kv.Key);
+                now.Add(gdi);
+                if (gdi != null) RememberScreen(kv.Value.Name, gdi);
+            }
+            List<Hdr.Display> on, off;
+            PlanScreens(now, Hdr.All(), new HashSet<string>(owned.Select(o => o.Key)), out on, out off);
+            if (on.Count == 0 && off.Count == 0) return;
+            bool ours = InOurMode();
+            foreach (var d in on)
+                if (Hdr.Set(d, true) && !owned.Any(o => o.Key == d.Key)) owned.Add(d);
+            foreach (var d in off)
+            {
+                if (d.Key == brightKey) RestoreBrightness();
+                Hdr.Set(d, false);
+                owned.RemoveAll(o => o.Key == d.Key);
+            }
+            if (ours) KeepMode();
+            UpdateTray();
+        }
+
+        /// <summary>
+        /// Which displays to switch, given the screens the HDR games' windows are on (null: no window yet). A screen with a
+        /// game that can do HDR gets it. One this app switched (owned) goes back only when every game's screen is known,
+        /// so HDR never goes off under a game that is still starting.
+        /// </summary>
+        internal static void PlanScreens(IList<string> gameScreens, IList<Hdr.Display> all, ICollection<string> owned,
+            out List<Hdr.Display> turnOn, out List<Hdr.Display> turnOff)
+        {
+            turnOn = new List<Hdr.Display>();
+            turnOff = new List<Hdr.Display>();
+            var wanted = new HashSet<string>();
+            bool unsure = false;
+            foreach (string gdi in gameScreens)
+            {
+                var d = gdi == null ? null : all.FirstOrDefault(x => x.Gdi == gdi);
+                if (d != null && d.Supported) wanted.Add(d.Key);
+                else unsure = true;   // no window yet, or on a screen without HDR: leave HDR where it is for that game
+            }
+            if (wanted.Count == 0) return;
+            foreach (var d in all) if (wanted.Contains(d.Key) && !d.On) turnOn.Add(d);
+            if (unsure) return;
+            foreach (var d in all) if (!wanted.Contains(d.Key) && d.On && owned.Contains(d.Key)) turnOff.Add(d);
+        }
+
+        void RememberScreen(string game, string gdi)
+        {
+            string was;
+            if (screens.TryGetValue(game, out was) && was == gdi) return;
+            screens[game] = gdi;
+            try { using (var k = Registry.CurrentUser.CreateSubKey(ScreensKey)) k.SetValue(game, gdi); } catch { }
+        }
+
+        static Dictionary<string, string> ReadScreens()
+        {
+            var d = new Dictionary<string, string>();
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(ScreensKey))
+                    if (k != null)
+                        foreach (string n in k.GetValueNames())
+                        {
+                            string v = k.GetValue(n) as string;
+                            if (!string.IsNullOrEmpty(v)) d[n] = v;
+                        }
+            }
+            catch { }
+            return d;
         }
 
         /// <summary>
@@ -1072,7 +1174,7 @@ namespace HdrSwitch
         void SyncBrightness()
         {
             int want = WantedBrightness();
-            var d = want < 0 ? null : Hdr.Primary();
+            var d = want < 0 ? null : HdrDisplayFor(running.Values.Select(r => r.Name).FirstOrDefault(brightness.ContainsKey));
             if (d == null || !d.On) { RestoreBrightness(); return; }
             if (brightBack >= 0 && brightKey != d.Key) RestoreBrightness();   // another display now
             int now = Hdr.SdrWhite(d), level = Hdr.LevelOf(want);
@@ -2077,6 +2179,46 @@ namespace HdrSwitch
         }
 
         const uint TH32CS_SNAPPROCESS = 2;
+
+        /// <summary>The screen (\\.\DISPLAY2) of a process's largest visible window, or null while it has none.</summary>
+        public static string WindowScreen(int pid)
+        {
+            IntPtr best = IntPtr.Zero;
+            long bestArea = 0;
+            EnumWindows((h, l) =>
+            {
+                uint owner;
+                GetWindowThreadProcessId(h, out owner);
+                Rect r;
+                if (owner != (uint)pid || !IsWindowVisible(h) || IsIconic(h) || !GetWindowRect(h, out r)) return true;
+                long w = r.Right - r.Left, ht = r.Bottom - r.Top;
+                if (w >= 320 && ht >= 200 && w * ht > bestArea) { best = h; bestArea = w * ht; }   // not a splash's tiny helper
+                return true;
+            }, IntPtr.Zero);
+            if (best == IntPtr.Zero) return null;
+            IntPtr mon = MonitorFromWindow(best, 0);   // MONITOR_DEFAULTTONULL
+            if (mon == IntPtr.Zero) return null;
+            var mi = new MonitorInfoEx { Size = Marshal.SizeOf(typeof(MonitorInfoEx)) };
+            return GetMonitorInfo(mon, ref mi) ? mi.Device : null;
+        }
+
+        delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr param);
+        [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct MonitorInfoEx
+        {
+            public int Size;
+            public Rect Monitor, Work;
+            public uint Flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string Device;
+        }
+        [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc callback, IntPtr param);
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out Rect r);
+        [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfoEx info);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         struct ProcessEntry
