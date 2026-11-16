@@ -272,6 +272,16 @@ namespace HdrSwitch.Tests
             Run.Equal(0, GameScanner.GamingRoots(null).Count, "no file");
         }
 
+        public static void DelayCycle()
+        {
+            Run.Equal(10, TrayApp.NextDelay(3), "3 s → 10 s");
+            Run.Equal(60, TrayApp.NextDelay(30), "30 s → 60 s");
+            Run.Equal(3, TrayApp.NextDelay(60), "60 s goes round to 3 s");
+            Run.Equal(10, TrayApp.NextDelay(5), "a value set by hand moves on to the next choice");
+            Run.Equal(1, TrayApp.ValidDelay(0), "at least 1 s");
+            Run.Equal(600, TrayApp.ValidDelay(100000), "at most 10 minutes");
+        }
+
         // ---- updates ----
 
         const string ReleaseJson = "{\"tag_name\":\"v1.7.0\",\"assets\":["

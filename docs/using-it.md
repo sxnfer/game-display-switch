@@ -21,6 +21,8 @@ Click the icon (left or right button) and a small panel slides in by the taskbar
 |---|---|
 | **Status** | `HDR on` with the game's name, `Waiting for a game`, or `No HDR display`, with an amber dot while HDR is on. A setup hint (for example about a missing resolution) stays here until the game closes. An **Update to …** button appears here when there is one; while it updates it shows each step: Downloading, Verifying, Restarting. |
 | **Tiles** | **Start with Windows**, **SDR while recording** ([Recording and streaming](recording.md)) and **Island** (see below). A tile is white glass and says **On** while it is on, clear and **Off** otherwise. |
+| **Switch back after** | How long it waits after the last game closes before SDR (and the saved resolution) come back: 3 s, 10 s, 30 s or 60 s, one click for the next. A longer wait helps with launchers that close the game and start it again. |
+| **Pause** | Stops all switching: what Display Switch turned on goes back at once, and nothing switches until you click **Resume**. **Ctrl+Alt+H** does the same from anywhere, even in a game. A pause lasts until you resume or restart the app. |
 | **Games** | Every game it found, each with a switch: amber means HDR turns on for it. Switching one off keeps it listed, so a slip is one click to undo. The two round buttons in the header **look for games** again and **add a program** it missed, from a list of the programs that are running. |
 | **Bottom bar** | The pencil opens `games.txt`, **Exit** quits. |
 
@@ -35,7 +37,8 @@ When something happens, a small pill drops in at the top-centre of the screen an
 | | |
 |---|---|
 | **A game starts** | The game's name with `HDR on`, and its competitive resolution if it has one. It then shrinks to a dot and `HDR on`. |
-| **A game closes** | `SDR in 3s`, counting down, then `SDR`. Starting a game again in that time cancels it. |
+| **A game closes** | `SDR in 3s` (or the wait you chose), counting down, then `SDR`. Starting a game again in that time cancels it. |
+| **Pause** | `Paused` when you pause with Ctrl+Alt+H or the flyout, and `HDR on` or `Resumed` when you resume. |
 | **Recording** | `OBS Studio · SDR` with a red dot beside it, when **SDR while recording** takes HDR off. |
 | **Updates and scans** | A new version, a finished update, the games a scan found. |
 

@@ -69,7 +69,10 @@ namespace HdrSwitch
 
     sealed partial class TrayApp : ApplicationContext
     {
-        const int SdrDelayMs = 3000;   // wait after the last game closes (covers launchers that restart the game)
+        // How long to wait after the last game closes before SDR and the saved mode come back: it covers launchers that
+        // restart the game. 3 s unless changed in the flyout; a launcher that takes longer needs one of the longer waits.
+        internal static readonly int[] DelayChoices = { 3, 10, 30, 60 };
+        int sdrDelay = ValidDelay(ReadInt("SdrDelay", 3));
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         // The app was called HDR Switch until 1.6.0. These names stay as they were so an update keeps the
         // startup entry, settings, game list and the single-instance lock of the copy it replaces.
@@ -97,7 +100,7 @@ namespace HdrSwitch
         readonly NotifyIcon tray = new NotifyIcon();
         readonly Icon iconOn = MakeIcon(true);
         readonly Icon iconOff = MakeIcon(false);
-        readonly System.Windows.Forms.Timer sdrTimer = new System.Windows.Forms.Timer { Interval = SdrDelayMs };
+        readonly System.Windows.Forms.Timer sdrTimer = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer scanTimer = new System.Windows.Forms.Timer { Interval = 1000 };     // catches games as their process starts
         readonly System.Windows.Forms.Timer steamTimeout = new System.Windows.Forms.Timer { Interval = 60000 }; // Play pressed, but no game appeared
         readonly System.Windows.Forms.Timer reloadTimer = new System.Windows.Forms.Timer { Interval = 300 };   // debounces edits to games.txt / resolutions.txt
@@ -169,6 +172,7 @@ namespace HdrSwitch
             tray.MouseUp += (s, e) => { if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right) flyout.Toggle(); };
             tray.Visible = true;
 
+            sdrTimer.Interval = sdrDelay * 1000;
             sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); Settle(); };
             scanTimer.Tick += (s, e) => { Rescan(); island.Poll(); };
             steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); Settle(); };
@@ -183,6 +187,7 @@ namespace HdrSwitch
             watcher.EnableRaisingEvents = true;
 
             steam = new SteamWatcher(id => ui.Post(_ => OnSteamStarted(id), null));
+            hotkey = new HotKey(() => SetPaused(!paused));
             onDisplayChanged = (s, e) => ui.Post(_ => OnDisplayChanged(true), null);
             SystemEvents.DisplaySettingsChanged += onDisplayChanged;
 
@@ -348,7 +353,7 @@ namespace HdrSwitch
             bool hdr = owned.Count > 0 && !HdrRunning();
             string what = hdr ? "SDR" : res != null && res.Back != null ? res.Back.Text : "Resolution";
             Announce(new Island.Act { Id = "sdr", Hold = true, Dot = hdr ? Theme.Amber : Theme.Text1,
-                Live = () => what + " in " + Math.Max(1, (int)Math.Ceiling((SdrDelayMs - grace.ElapsedMilliseconds) / 1000.0)) + "s" });
+                Live = () => what + " in " + Math.Max(1, (int)Math.Ceiling((sdrDelay * 1000 - grace.ElapsedMilliseconds) / 1000.0)) + "s" });
         }
 
         /// <summary>Says something on the island – or, with the island switched off, as a notification if it has one.</summary>
@@ -478,7 +483,7 @@ namespace HdrSwitch
         /// <summary>True if HDR was switched on just now.</summary>
         bool SwitchOn()
         {
-            if (recorder != null) return false;   // SDR while recording
+            if (recorder != null || paused) return false;   // SDR while recording, or paused
             var d = Hdr.Primary();
             if (d == null || d.On) return false;   // no HDR display, or HDR already on (not ours to switch back)
             bool ours = InOurMode();
@@ -519,6 +524,75 @@ namespace HdrSwitch
             WriteSetting("SdrWhileRecording", on);
             if (on) Rescan();
             else SetRecorder(null);
+        }
+
+        // ---- pause and the wait before SDR ----
+
+        HotKey hotkey;
+        bool paused;   // for this session: nothing switches until it is resumed (Ctrl+Alt+H or the flyout)
+
+        /// <summary>
+        /// Paused: what this app switched goes back at once (the mode, then SDR) and nothing switches until it is resumed.
+        /// Games are still followed meanwhile, so resuming switches for the ones that are running.
+        /// </summary>
+        void SetPaused(bool on)
+        {
+            if (on == paused) return;
+            paused = on;
+            if (on)
+            {
+                sdrTimer.Stop();
+                steamTimeout.Stop();
+                island.End("sdr");
+                RevertResolution();
+                RestoreStrayScaling();
+                foreach (var d in owned) Hdr.Set(d, false);
+                owned.Clear();
+                Announce(new Island.Act { Id = "pause", Text = "Paused", Dot = Theme.Grey, Seconds = 2,
+                    Balloon = "Paused: HDR and resolutions stay as they are until you resume (" + HotKey.Text + ")." });
+            }
+            else
+            {
+                bool hdr = HdrRunning() && SwitchOn();
+                ReapplyProfiles();
+                Announce(new Island.Act { Id = "pause", Text = hdr ? "HDR on" : "Resumed", Dot = hdr ? Theme.Amber : Theme.Text1, Seconds = 2,
+                    Balloon = "Resumed." });
+            }
+            UpdateTray();
+        }
+
+        void SetDelay(int seconds)
+        {
+            sdrDelay = ValidDelay(seconds);
+            WriteInt("SdrDelay", sdrDelay);
+            bool counting = sdrTimer.Enabled;
+            sdrTimer.Stop();
+            sdrTimer.Interval = sdrDelay * 1000;
+            if (counting) { sdrTimer.Start(); grace.Restart(); }   // the countdown starts again at the new length
+        }
+
+        /// <summary>The next of the delays the flyout offers, round and round.</summary>
+        internal static int NextDelay(int seconds)
+        {
+            foreach (int d in DelayChoices) if (d > seconds) return d;
+            return DelayChoices[0];
+        }
+
+        internal static int ValidDelay(int seconds) { return Math.Max(1, Math.Min(600, seconds)); }
+
+        static int ReadInt(string name, int unset)
+        {
+            using (var k = Registry.CurrentUser.OpenSubKey(SettingsKey))
+            {
+                object v = k == null ? null : k.GetValue(name);
+                return v is int ? (int)v : unset;
+            }
+        }
+
+        static void WriteInt(string name, int value)
+        {
+            using (var k = Registry.CurrentUser.CreateSubKey(SettingsKey))
+                k.SetValue(name, value, RegistryValueKind.DWord);
         }
 
         static bool ReadSetting(string name) { return ReadSetting(name, false); }
@@ -611,7 +685,7 @@ namespace HdrSwitch
         bool ApplyResolution(string name)
         {
             Resolution.Mode p;
-            if (!profiles.TryGetValue(name, out p)) return false;
+            if (paused || !profiles.TryGetValue(name, out p)) return false;
             if (res != null)
             {
                 if (res.Game.Length == 0) res.Game = name;   // taken over from a previous run (see RecoverResolution)
@@ -1141,6 +1215,7 @@ namespace HdrSwitch
         {
             var displays = Hdr.All();
             var hdrGames = running.Values.Where(r => games.Contains(r.Name)).Select(r => DisplayName(r.Name)).Distinct().ToList();
+            if (paused) return "Paused – " + HotKey.Text + " resumes";
             string hdr = !displays.Any(d => d.Supported) ? "No HDR display"
                 : recorder != null && !displays.Any(d => d.On) ? "SDR – " + RecorderName(recorder) + " running"
                 : hdrGames.Count > 0 ? "HDR on – " + string.Join(", ", hdrGames)
@@ -1240,6 +1315,7 @@ namespace HdrSwitch
         {
             watcher.Dispose();
             steam.Dispose();
+            hotkey.Dispose();
             SystemEvents.DisplaySettingsChanged -= onDisplayChanged;
             scanTimer.Stop();
             modeCheck.Stop();
@@ -1466,6 +1542,41 @@ namespace HdrSwitch
 
         [DllImport("advapi32.dll")]
         static extern int RegNotifyChangeKeyValue(SafeRegistryHandle key, bool subtree, uint filter, SafeWaitHandle ev, bool async);
+    }
+
+    /// <summary>A key combination that works from anywhere, even in a game: Ctrl+Alt+H pauses or resumes switching.</summary>
+    sealed class HotKey : NativeWindow, IDisposable
+    {
+        public const string Text = "Ctrl+Alt+H";
+        const int Id = 1, WM_HOTKEY = 0x312;
+        const uint MOD_ALT = 1, MOD_CONTROL = 2, MOD_NOREPEAT = 0x4000;
+        readonly Action pressed;
+
+        /// <summary>False if another program has the combination already.</summary>
+        public readonly bool Registered;
+
+        public HotKey(Action pressed)
+        {
+            this.pressed = pressed;
+            CreateHandle(new CreateParams());   // a hidden window, only for the message
+            Registered = RegisterHotKey(Handle, Id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, (uint)Keys.H);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_HOTKEY && (int)m.WParam == Id) pressed();
+            base.WndProc(ref m);
+        }
+
+        public void Dispose()
+        {
+            if (Handle == IntPtr.Zero) return;
+            if (Registered) UnregisterHotKey(Handle, Id);
+            DestroyHandle();
+        }
+
+        [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint key);
+        [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hwnd, int id);
     }
 
     sealed class ProcessWaitHandle : WaitHandle

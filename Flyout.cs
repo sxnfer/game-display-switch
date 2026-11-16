@@ -353,6 +353,44 @@ namespace HdrSwitch
                     () => { app.SetIsland(!app.islandOn); Rebuild(); });
                 y += tileH + G;
 
+                // How switching behaves: how long to wait before switching back, and a pause (also on Ctrl+Alt+H).
+                int barH = S(52), pillH = S(32);
+                var c2 = new Rectangle(M, y, W - 2 * M, barH);
+                int waitW = TextRenderer.MeasureText("Switch back after", fonts.Body, Size.Empty, TfLeft).Width + S(4);
+                items.Add(new Item { Rect = c2, Paint = (g, rc, lk) =>
+                {
+                    Glass.Chip(g, rc, S(20), Theme.Chip);
+                    Draw(g, "Switch back after", fonts.Body, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, waitW, rc.Height), TfLeft);
+                } });
+                RollText delay = Roll("delay", app.sdrDelay + " s", fonts.Strong);
+                var dr = new Rectangle(c2.X + CP + waitW + S(8), c2.Y + (barH - pillH) / 2, S(64), pillH);
+                items.Add(new Item { Rect = dr, Key = "delay", Tip = "The wait after a game closes, for launchers that restart it. Click for the next one.",
+                    Click = () => { app.SetDelay(NextDelay(app.sdrDelay)); Rebuild(); },
+                    Paint = (g, rc, lk) =>
+                    {
+                        Color fill = Theme.Mix(Theme.Mix(Theme.Raised, Theme.Hover, lk.Hover), Theme.Press, lk.Press);
+                        Theme.Fill(g, rc, rc.Height / 2f, fill);
+                        Glass.Edge(g, rc, rc.Height / 2f, 1);
+                        DrawRoll(g, delay, fonts.Strong, Theme.Text1, rc, 0);
+                    } });
+                bool paused = app.paused;
+                RollText pause = Roll("pause", paused ? "Resume" : "Pause", fonts.Strong);
+                int pauseW = Math.Max(TextRenderer.MeasureText("Resume", fonts.Strong, Size.Empty, TfLeft).Width, TextRenderer.MeasureText("Pause", fonts.Strong, Size.Empty, TfLeft).Width) + S(36);
+                var pr = new Rectangle(c2.Right - CP + S(6) - pauseW, dr.Y, pauseW, pillH);
+                items.Add(new Item { Rect = pr, Key = "pause", On = paused,
+                    Tip = (paused ? "Switching is paused. " : "Stops all switching until you resume. ") + HotKey.Text + (app.hotkey.Registered ? " does this from anywhere." : " is taken by another program."),
+                    Click = () => { app.SetPaused(!app.paused); Rebuild(); },
+                    Paint = (g, rc, lk) =>
+                    {
+                        // Lit like a tile while paused, so the paused state is seen at a glance.
+                        Color rest = Theme.Mix(Theme.Raised, Theme.Lit, lk.On);
+                        Color over = Theme.Mix(Theme.Hover, Theme.LitHover, lk.On), down = Theme.Mix(Theme.Press, Theme.LitPress, lk.On);
+                        Theme.Fill(g, rc, rc.Height / 2f, Theme.Mix(Theme.Mix(rest, over, lk.Hover), down, lk.Press));
+                        Glass.Edge(g, rc, rc.Height / 2f, 1 - lk.On);
+                        DrawRoll(g, pause, fonts.Strong, Theme.Mix(Theme.Text1, Theme.Ink, lk.On), rc, 0);
+                    } });
+                y += barH + G;
+
                 // The list: games with a switch each, running programs to add, or the resolutions for one game.
                 int headH = S(44);
                 rowH = S(44);
@@ -390,7 +428,7 @@ namespace HdrSwitch
                 }
                 else names = app.games.Concat(app.excluded).Concat(app.profiles.Keys).Distinct().OrderBy(app.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
                 int count = choosing != null ? modes.Count : names.Count;
-                int visible = Math.Max(1, Math.Min(6, count));
+                int visible = Math.Max(1, Math.Min(5, count));   // five rows: the flyout stays clear of the screen's top at 150 %
                 int footH = choosing != null ? S(52) : S(8);
                 var c3 = new Rectangle(M, y, W - 2 * M, headH + visible * rowH + footH);
                 items.Add(new Item { Rect = c3, Paint = (g, rc, lk) => Glass.Chip(g, rc, S(20), Theme.Chip) });
@@ -613,6 +651,7 @@ namespace HdrSwitch
                 on = displays.Any(d => d.On);
                 var hdrGames = app.running.Values.Where(r => app.games.Contains(r.Name)).Select(r => app.DisplayName(r.Name)).Distinct().ToList();
                 var res = app.res;
+                if (app.paused) { title = "Paused"; sub = "Nothing switches · " + HotKey.Text + " resumes"; return; }
                 if (!displays.Any(d => d.Supported)) { title = "No HDR display"; sub = "Check Windows display settings"; }
                 else if (app.recorder != null && !on)
                 {
