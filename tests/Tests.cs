@@ -351,7 +351,8 @@ namespace HdrSwitch.Tests
 
         const string ReleaseJson = "{\"tag_name\":\"v1.7.0\",\"assets\":["
             + "{\"name\":\"HdrSwitch.exe\",\"browser_download_url\":\"https://github.com/sxnfer/game-display-switch/releases/download/v1.7.0/HdrSwitch.exe\"},"
-            + "{\"name\":\"SHA256SUMS.txt\",\"browser_download_url\":\"https://github.com/sxnfer/game-display-switch/releases/download/v1.7.0/SHA256SUMS.txt\"}]}";
+            + "{\"name\":\"SHA256SUMS.txt\",\"browser_download_url\":\"https://github.com/sxnfer/game-display-switch/releases/download/v1.7.0/SHA256SUMS.txt\"},"
+            + "{\"name\":\"SHA256SUMS.txt.sig\",\"browser_download_url\":\"https://github.com/sxnfer/game-display-switch/releases/download/v1.7.0/SHA256SUMS.txt.sig\"}]}";
 
         public static void UpdateNewerRelease()
         {
@@ -378,6 +379,57 @@ namespace HdrSwitch.Tests
         public static void UpdateBadTag()
         {
             Run.True(Updater.Parse("{\"tag_name\":\"nightly\",\"assets\":[]}", new Version(1, 0, 0)) == null, "a tag that is no version");
+        }
+
+        public static void UpdateNeedsSignature()
+        {
+            int sig = ReleaseJson.IndexOf(",{\"name\":\"SHA256SUMS.txt.sig\"");
+            string unsigned = ReleaseJson.Substring(0, sig) + "]}";
+            Run.True(Updater.Parse(unsigned, new Version(1, 6, 1)) == null, "a release without a signature is not offered");
+            var r = Updater.Parse(ReleaseJson, new Version(1, 6, 1));
+            Run.True(r != null && r.SigUrl.EndsWith("/SHA256SUMS.txt.sig"), "the signature's url");
+        }
+
+        public static void SignatureChecks()
+        {
+            using (var key = new System.Security.Cryptography.RSACryptoServiceProvider(2048))
+            using (var other = new System.Security.Cryptography.RSACryptoServiceProvider(2048))
+            {
+                key.PersistKeyInCsp = other.PersistKeyInCsp = false;
+                byte[] sums = System.Text.Encoding.ASCII.GetBytes("0123abcd  HdrSwitch.exe\r\n");
+                // Signed the way the release workflow signs: RSA, SHA256, PKCS#1 v1.5, base64.
+                string sig = Convert.ToBase64String(key.SignData(sums, "SHA256"));
+                string pub = key.ToXmlString(false);
+                Run.True(Updater.Verified(sums, sig, pub), "a good signature");
+                Run.True(Updater.Verified(sums, " " + sig + "\n", pub), "spaces and a line break round it");
+                byte[] changed = (byte[])sums.Clone();
+                changed[0] = (byte)'f';
+                Run.True(!Updater.Verified(changed, sig, pub), "a changed checksum file");
+                Run.True(!Updater.Verified(sums, Convert.ToBase64String(other.SignData(sums, "SHA256")), pub), "signed by another key");
+                Run.True(!Updater.Verified(sums, "not base64!", pub), "garbage");
+                Run.True(!Updater.Verified(sums, "", pub), "empty");
+            }
+        }
+
+        public static void BuiltInKeyLoads()
+        {
+            // A signature by some other key fails cleanly – which also shows the built-in key itself loads.
+            using (var other = new System.Security.Cryptography.RSACryptoServiceProvider(2048))
+            {
+                other.PersistKeyInCsp = false;
+                byte[] data = { 1, 2, 3 };
+                Run.True(!Updater.Verified(data, Convert.ToBase64String(other.SignData(data, "SHA256")), Updater.PublicKeyXml), "rejected, no exception");
+                Run.True(Updater.PublicKeyXml.Contains("<Modulus>") && !Updater.PublicKeyXml.Contains("<D>"), "a public key only");
+            }
+        }
+
+        public static void BuiltInKeyMatchesTheReleaseKey()
+        {
+            // Signed once with the private update key (openssl dgst -sha256 -sign): proves the key built into the app is
+            // the public half of the key the release workflow signs with.
+            byte[] text = System.Text.Encoding.ASCII.GetBytes("display-switch update key check\n");
+            const string Sig = "EGjpLRkJCk5Ehox8d/P+rHbqAcBm59+/ipSPFF9Ki7jS7dqQfUGnUSOhu+D+sOE2kxj8hZqRz9IG+MHo6CUJd28ooJCtWyoY+HXzanspUewHduZfOkRwpt6G4FV4GgbO3L4B3Q/PC1cJs05FlHH+ENh8CmrNOrBJ0hRXLvzD1j6hYWOUKQGiVjJP5Ea7jkotkEc+5OL6X9XXV3bJaw9NceDUvCbNC/8bGl3qLPrRdUwsSRJXicxHamsCEjB9YadHcJ7LeR62zrxPzQviGksEBVoiIwei5+O65H55NtZLLzxuHMmPYxTQH0nwzXQgi1RC7hd8f+igE7dD8CfVJFbwOAbVi0dWPgbz4jHHWXCEZABEYPZNIkqS+Cm+vx6KAoSDwJeJvHBgmxjx8rpmPY84mhRCC9uCdoV8B+Rhq9CQ7W3TrwZmMGd7yd8vjmWUre0NdFpSPtV4L+O94NkmcRkchG07IJfYVGg0mmGkwamJHMEbtPKR8u8E8zXy9RTYzYtK";
+            Run.True(Updater.Verified(text, Sig, Updater.PublicKeyXml), "the release key's signature is accepted");
         }
 
         public static void ChecksumLine()

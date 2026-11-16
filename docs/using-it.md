@@ -55,7 +55,7 @@ The island's shapes and motion are inspired by Apple's Dynamic Island and by the
 
 ## Updates
 
-Display Switch checks this repository once a day. When there is a new version, an **Update to …** button appears at the top of the flyout. One click downloads it, checks it against the release's SHA256 checksum, and restarts the app. The update check is the only time the app goes online.
+Display Switch checks this repository once a day. When there is a new version, an **Update to …** button appears at the top of the flyout. One click downloads it, checks it against the release's SHA256 checksum and that checksum file's signature, and restarts the app. A release without a valid signature is never offered. The update check is the only time the app goes online.
 
 ## Uninstall
 

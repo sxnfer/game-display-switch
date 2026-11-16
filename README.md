@@ -29,4 +29,4 @@ Finds your games on its own: Steam, Epic, GOG, Ubisoft Connect, the EA app, Batt
 
 Windows 10 or 11 · No install · ~0.2% of one CPU core · ~20 MB
 
-<sub>Every release is built by GitHub Actions from this repository and ships with its SHA-256 checksum.</sub>
+<sub>Every release is built by GitHub Actions from this repository and ships with its SHA-256 checksum, signed with the project's update key.</sub>

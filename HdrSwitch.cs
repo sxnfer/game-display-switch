@@ -1581,7 +1581,10 @@ namespace HdrSwitch
 
     /// <summary>
     /// Updates from this project's GitHub releases. Only api.github.com and the release downloads of this repository
-    /// are ever contacted, and a download is only installed if its SHA256 matches the release's SHA256SUMS.txt.
+    /// are ever contacted, and a download is only installed if its SHA256 matches the release's SHA256SUMS.txt – and
+    /// that file is only believed if SHA256SUMS.txt.sig is its signature by the project's update key. The checksum
+    /// alone shows the download arrived intact; the signature shows SHA256SUMS.txt came from the release workflow,
+    /// which holds the key as a secret, and not from a file changed or added to the release afterwards.
     /// Install: the running exe is renamed to HdrSwitch.old.exe (Windows allows that), the new one takes its name
     /// and is started with --updated; it waits for this copy to exit and removes the old file.
     /// </summary>
@@ -1602,7 +1605,7 @@ namespace HdrSwitch
         public sealed class Release
         {
             public Version Version;
-            public string ExeUrl, SumsUrl;
+            public string ExeUrl, SumsUrl, SigUrl;
             public string VersionText { get { return Text(Version); } }
         }
 
@@ -1640,8 +1643,9 @@ namespace HdrSwitch
                 if (url == null || !DownloadPrefixes.Any(p => url.StartsWith(p, StringComparison.OrdinalIgnoreCase))) continue;
                 if (name == ExeName) r.ExeUrl = url;
                 else if (name == "SHA256SUMS.txt") r.SumsUrl = url;
+                else if (name == "SHA256SUMS.txt.sig") r.SigUrl = url;
             }
-            return r.ExeUrl != null && r.SumsUrl != null ? r : null;
+            return r.ExeUrl != null && r.SumsUrl != null && r.SigUrl != null ? r : null;   // an unsigned release is never offered
         }
 
         /// <summary>
@@ -1654,14 +1658,18 @@ namespace HdrSwitch
             string dir = Path.GetDirectoryName(exe);
             string fresh = Path.Combine(dir, "HdrSwitch.new.exe"), old = Path.Combine(dir, "HdrSwitch.old.exe");
 
-            byte[] bytes;
-            string sums;
+            byte[] bytes, sumsRaw;
+            string sig;
             using (var web = Client())
             {
-                sums = web.DownloadString(r.SumsUrl);
+                sumsRaw = web.DownloadData(r.SumsUrl);
+                sig = Encoding.ASCII.GetString(web.DownloadData(r.SigUrl));
                 bytes = web.DownloadData(r.ExeUrl);
             }
             step("Verifying");
+
+            if (!Verified(sumsRaw, sig, PublicKeyXml)) throw new Exception("the release's signature doesn't match – nothing was changed.");
+            string sums = Encoding.ASCII.GetString(sumsRaw);
 
             string expected = ExpectedHash(sums);
             if (expected == null) throw new Exception("the release has no checksum for " + ExeName + ".");
@@ -1685,6 +1693,29 @@ namespace HdrSwitch
 
             step("Restarting");
             Process.Start(new ProcessStartInfo(exe, "--updated") { UseShellExecute = false, WorkingDirectory = dir });
+        }
+
+        /// <summary>
+        /// The public half of the update key (RSA 3072). The private half signs SHA256SUMS.txt in the release workflow
+        /// (the UPDATE_SIGNING_KEY secret). A new key means only copies built with it accept the releases signed by it.
+        /// </summary>
+        internal const string PublicKeyXml = "<RSAKeyValue><Modulus>x2yxTidmEx/SLfU+h1US6nznvuUl+VxJ+0KgQZciLRio04OU8sJYRxco6bF8r5nMFqrMcMiGXoUTkG+peJVqTypTgyodY6jpQt0VIlRjz01Qm0NWdCiOBglvtuREaxJdrzTTEDPO6cEtrlSM31C0/OKH+wEvZmcyrevcbnyNNiN0/mZb7bZZY68rJa6gfRAh/23OGHW9Iaxoj+qNmPN8/BbX4WkjUJKFuWaU9G1k9ncsfgRmouG/CQtPBUzMe5N3Tt2JKBU0852gBi5h6N2nvUT7s2/H6RNf7Vr9t25ty1Lm0x1kAV+7PP78GpJ53tjZ0bHLnOpBy1GVUkiaHot0Qzv07tSLs9FYeiuQXy6HNH4HBjSGL56H+8i3aCQYEtpckS0s9dOhaNQXtigra6XhuXdGO4vnxNmd9lIlBgL7urxHnYCjtbDho0LuofwuFoxMPG0UBHGNmVDMDB1uJRzRgh1/Y5S8rU/ds7d/GSVYdPKxsTw2EHJyHdU9W5g0PHM/</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>";
+
+        /// <summary>True if sig (base64) is a valid RSA-SHA256 signature of data by this key.</summary>
+        internal static bool Verified(byte[] data, string sig, string publicKeyXml)
+        {
+            try
+            {
+                byte[] s = Convert.FromBase64String((sig ?? "").Trim());
+                using (var rsa = new System.Security.Cryptography.RSACryptoServiceProvider())
+                {
+                    rsa.PersistKeyInCsp = false;
+                    rsa.FromXmlString(publicKeyXml);
+                    return rsa.VerifyData(data, "SHA256", s);
+                }
+            }
+            catch (FormatException) { return false; }
+            catch (System.Security.Cryptography.CryptographicException) { return false; }
         }
 
         /// <summary>The SHA256 that SHA256SUMS.txt gives for the exe, in lower case, or null.</summary>
