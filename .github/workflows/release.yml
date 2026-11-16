@@ -21,6 +21,10 @@ jobs:
           set TAG=${{ github.ref_name }}
           call build.cmd %TAG:~1%
 
+      - name: Test
+        shell: cmd
+        run: call test.cmd
+
       - name: Checksum
         shell: pwsh
         run: |

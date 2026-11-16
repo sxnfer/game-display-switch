@@ -16,6 +16,8 @@ Your game list lives in `%AppData%\HdrSwitch\games.txt` (one exe per line; a `-`
 
 Run `build.cmd` (or `build.cmd 1.2.0` for a versioned build). It uses the C# compiler that ships with Windows (.NET Framework 4.8).
 
+`test.cmd` builds and runs the checks in `tests\` (parsing, the updater, rolling text, springs). GitHub runs both on every push, and a release is only published if the checks pass.
+
 ## Publishing a new version
 
 Commit your changes, then tag and push:
