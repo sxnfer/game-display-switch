@@ -2,8 +2,10 @@
 // behind it come through, the detail does not, and light catches its edge. Five layers, from the back to the front:
 //
 //  1. What is behind: the desktop or a game. The app never reads these pixels.
-//  2. Blur: Windows makes it (the accent blur of SetWindowCompositionAttribute, on Windows 10 and 11), so the cost is
-//     the compositor's. The blur fills the whole window rectangle, so each window's region is set to its shape.
+//  2. Blur: Windows makes it, so the cost is the compositor's. The flyout on Windows 11 22H2 and later: Windows' own
+//     Acrylic backdrop (SetBackdrop). Otherwise, and for the island, which must stay a layered window to let clicks
+//     through: the accent blur of SetWindowCompositionAttribute. That blur fills the whole window rectangle, so the
+//     window's region is set to its shape.
 //  3. Veil: one thin dark fill (Theme.Veil), just enough that white text reads on a bright desktop.
 //  4. Glow: a soft white light from the top-left, so the panel looks thick instead of flat.
 //  5. Rim: a 1 px edge, bright at the top-left and at the bottom-right and almost gone between. It gives the liquid look.
@@ -31,6 +33,29 @@ namespace HdrSwitch
     static class Glass
     {
         static bool transparency = true;
+
+        /// <summary>Windows 11 22H2 and later: Windows draws a backdrop material behind a window, the documented way.</summary>
+        public static readonly bool SystemBackdrop = Environment.OSVersion.Version.Build >= 22621;
+
+        /// <summary>
+        /// Gives an ordinary window Windows' own Acrylic: dark, rounded corners, the client area all glass (the frame
+        /// extended over it), so pixels drawn with alpha let the blurred backdrop through. Windows makes it solid by
+        /// itself when "Transparency effects" is off.
+        /// </summary>
+        public static void SetBackdrop(IntPtr hwnd)
+        {
+            try
+            {
+                int v = 1; Native.DwmSetWindowAttribute(hwnd, 20, ref v, 4);                  // DWMWA_USE_IMMERSIVE_DARK_MODE
+                v = 2; Native.DwmSetWindowAttribute(hwnd, 33, ref v, 4);                      // DWMWA_WINDOW_CORNER_PREFERENCE: round
+                v = unchecked((int)0xFFFFFFFE); Native.DwmSetWindowAttribute(hwnd, 34, ref v, 4);   // DWMWA_BORDER_COLOR: none, the rim is ours
+                var m = new Native.Margins { Left = -1, Right = -1, Top = -1, Bottom = -1 };
+                Native.DwmExtendFrameIntoClientArea(hwnd, ref m);
+                v = 3; Native.DwmSetWindowAttribute(hwnd, 38, ref v, 4);                      // DWMWA_SYSTEMBACKDROP_TYPE: DWMSBT_TRANSIENTWINDOW (Acrylic)
+            }
+            catch (DllNotFoundException) { }
+            catch (EntryPointNotFoundException) { }
+        }
 
         /// <summary>False when "Transparency effects" is off in Windows: no blur, a solid veil.</summary>
         public static bool Transparency { get { return transparency; } }
@@ -100,6 +125,13 @@ namespace HdrSwitch
                 G.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;   // ClearType has no meaning on a transparent surface
             }
 
+            /// <summary>Copies what was drawn, alpha and all, into a window's device context (its WM_PAINT).</summary>
+            public void CopyTo(IntPtr hdc)
+            {
+                G.Flush(FlushIntention.Sync);
+                Native.BitBlt(hdc, 0, 0, Size.Width, Size.Height, dc, 0, 0, 0x00CC0020);   // SRCCOPY
+            }
+
             /// <summary>Shows what was drawn, at this screen point, faded by alpha (0 → 1).</summary>
             public void Present(IntPtr hwnd, Point at, double alpha)
             {
@@ -131,8 +163,13 @@ namespace HdrSwitch
         /// <summary>Layers 3 and 4: the veil and the glow. Draw the content on it, then the Rim.</summary>
         public static void Panel(Graphics g, RectangleF r, float radius)
         {
+            Panel(g, r, radius, transparency ? Theme.Veil : Theme.Solid);
+        }
+
+        public static void Panel(Graphics g, RectangleF r, float radius, Color veil)
+        {
             if (r.Width < 2 || r.Height < 2) return;
-            Theme.Fill(g, r, radius, transparency ? Theme.Veil : Theme.Solid);
+            Theme.Fill(g, r, radius, veil);
             using (var p = Theme.Round(r, radius))
             using (var glow = new LinearGradientBrush(r, W(0), W(0), 70f, true))
             {

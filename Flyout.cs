@@ -2,10 +2,13 @@
 // with soft cards on it, capsule buttons, sliding switches, white glass for what is on, amber for HDR and nothing else.
 // Nothing here changes any state itself – every click calls back into TrayApp and rebuilds the view.
 //
-// Like the island it is a layered window drawn through UpdateLayeredWindow: per-pixel alpha, so the glass shows the
-// blurred desktop and its corners are its own. Its region is its rounded shape, which keeps the blur inside it. The
-// price: no ClearType (grey anti-aliasing on glass) and no system shadow. Invalidate() still works as usual: it
-// queues one Render for the next message, which paints the whole surface and hands it to Windows.
+// Every frame is painted onto one 32-bit surface with alpha (Glass.Surface), then shown in one of two ways:
+//  - Windows 11 22H2 and later: an ordinary window with Windows' own Acrylic backdrop (the documented
+//    DWMWA_SYSTEMBACKDROP_TYPE) behind a client area that is all glass. OnPaint copies the surface in with its alpha,
+//    so what is behind the window shows through, blurred. Windows gives it its corners (8 px) and its shadow.
+//  - Earlier: a layered window like the island (UpdateLayeredWindow) with the accent blur, its region the design's
+//    26 px rounded shape. Invalidate() queues one Render for the next message, as no WM_PAINT comes.
+// Either way: no ClearType (grey anti-aliasing on glass).
 
 using System;
 using System.Collections.Generic;
@@ -65,6 +68,7 @@ namespace HdrSwitch
             readonly TextFormatFlags TfLeft, TfCenter, TfCaption, TfWrap;   // TfCaption: right-aligned, never shortened
             Rectangle listClip;
             Glass.Surface surface;   // what UpdateLayeredWindow shows; kept while the flyout is open
+            readonly bool backdrop = Glass.SystemBackdrop;   // Windows 11 22H2 and later: Windows' own Acrylic (see the top)
             bool queued, blurOn;
             double fade = 1;         // the window's alpha: 0 → 1 as it opens
             int scroll, scrollMax, rowH;
@@ -90,7 +94,9 @@ namespace HdrSwitch
                 StartPosition = FormStartPosition.Manual;
                 BackColor = Theme.Solid;
                 Text = "Display Switch";
-                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+                // The surface is the double buffer already, and WinForms' own would lose its alpha on the way.
+                SetStyle(ControlStyles.OptimizedDoubleBuffer, false);
 
                 const TextFormatFlags Base = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter;
                 TfLeft = Base | TextFormatFlags.Left;
@@ -227,7 +233,19 @@ namespace HdrSwitch
 
             protected override CreateParams CreateParams
             {
-                get { var cp = base.CreateParams; cp.ExStyle |= 0x80 | 0x80000; return cp; }   // WS_EX_TOOLWINDOW: no Alt+Tab entry; WS_EX_LAYERED
+                get
+                {
+                    var cp = base.CreateParams;
+                    cp.ExStyle |= 0x80;                    // WS_EX_TOOLWINDOW: no Alt+Tab entry
+                    if (!backdrop) cp.ExStyle |= 0x80000;  // WS_EX_LAYERED
+                    return cp;
+                }
+            }
+
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                if (backdrop) Glass.SetBackdrop(Handle);
             }
 
             protected override void OnDeactivate(EventArgs e)
@@ -662,26 +680,53 @@ namespace HdrSwitch
             protected override void OnInvalidated(InvalidateEventArgs e)
             {
                 base.OnInvalidated(e);
-                if (queued || !IsHandleCreated) return;
+                if (backdrop || queued || !IsHandleCreated) return;   // the backdrop window paints on WM_PAINT as usual
                 queued = true;   // one Render for however many Invalidates come before it
                 BeginInvoke((Action)Render);
             }
 
-            /// <summary>Paints the whole window onto its surface and hands it to Windows, with the blur and the shape.</summary>
+            /// <summary>The backdrop window: the surface, copied with its alpha into the client area, which is all glass.</summary>
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                if (!backdrop || !Compose()) return;
+                IntPtr hdc = e.Graphics.GetHdc();
+                try { surface.CopyTo(hdc); }
+                finally { e.Graphics.ReleaseHdc(hdc); }
+            }
+
+            protected override void OnPaintBackground(PaintEventArgs e)
+            {
+                if (!backdrop) base.OnPaintBackground(e);   // OnPaint covers every pixel; an erase would only flicker
+            }
+
+            /// <summary>Shows what is true now: a WM_PAINT for the backdrop window, the layered surface otherwise.</summary>
             void Render()
             {
                 queued = false;
-                if (fonts == null || !IsHandleCreated || ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+                if (backdrop) { Update(); return; }
+                if (!Compose()) return;
+                bool blur = Glass.Transparency && fade >= 0.5;
+                if (blur != blurOn) { Glass.SetBlur(Handle, blur); blurOn = blur; }
+                surface.Present(Handle, Location, fade);
+            }
+
+            /// <summary>The corner radius: Windows' own on the backdrop window, the design's on the layered one.</summary>
+            int Radius { get { return backdrop ? S(8) : S(26); } }
+
+            /// <summary>Paints the whole window onto its surface. False: nothing to paint yet.</summary>
+            bool Compose()
+            {
+                if (fonts == null || !IsHandleCreated || ClientSize.Width <= 0 || ClientSize.Height <= 0) return false;
                 var all = new RectangleF(0, 0, ClientSize.Width, ClientSize.Height);
                 if (surface == null || surface.Size != ClientSize)
                 {
                     if (surface != null) surface.Dispose();
                     surface = new Glass.Surface(ClientSize);
-                    using (var p = Theme.Round(all, S(26))) Glass.SetShape(Handle, surface.G, p);
+                    if (!backdrop) using (var p = Theme.Round(all, Radius)) Glass.SetShape(Handle, surface.G, p);
                 }
                 var g = surface.G;
                 g.Clear(Color.Transparent);
-                Glass.Panel(g, all, S(26));
+                Glass.Panel(g, all, Radius, backdrop ? Theme.VeilOnAcrylic : Glass.Transparency ? Theme.Veil : Theme.Solid);
                 for (int i = 0; i < items.Count; i++)
                     if (!items[i].Scrolls) items[i].Paint(g, items[i].Rect, LookOf(i));
                 // The list scrolls inside a clip that keeps a half-scrolled row in the card.
@@ -705,10 +750,8 @@ namespace HdrSwitch
                     float thumbY = listClip.Y + S(4) + (trackH - thumbH) * (float)Math.Max(0, Math.Min(scrollMax, scrollTo.Value)) / scrollMax;
                     Theme.Fill(g, new RectangleF(listClip.Right - S(5), thumbY, S(3), thumbH), S(3) / 2f, Theme.Fade(Color.FromArgb(150, 255, 255, 255), thumb.Value));
                 }
-                Glass.Rim(g, all, S(26));
-                bool blur = Glass.Transparency && fade >= 0.5;
-                if (blur != blurOn) { Glass.SetBlur(Handle, blur); blurOn = blur; }
-                surface.Present(Handle, Location, fade);
+                Glass.Rim(g, all, Radius);
+                return true;
             }
 
             Look LookOf(int i)

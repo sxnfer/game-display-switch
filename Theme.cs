@@ -16,6 +16,7 @@ namespace HdrSwitch
         // Everything sits on glass (Glass.cs), so the surfaces are white at a few small strengths: they take their
         // colour from what is behind. Text is white at three strengths; dark text (Ink) only on white glass.
         public static readonly Color Veil = Color.FromArgb(72, 18, 18, 24);      // the glass itself: just enough for white text on a bright desktop
+        public static readonly Color VeilOnAcrylic = Color.FromArgb(16, 18, 18, 24);   // Windows' Acrylic is tinted already
         public static readonly Color Solid = Color.FromArgb(255, 30, 30, 34);    // the glass with "Transparency effects" off
         public static readonly Color None = Color.FromArgb(0, 255, 255, 255);    // no fill; mixes towards white
         public static readonly Color Chip = Color.FromArgb(18, 255, 255, 255);   // a card, an unlit tile
