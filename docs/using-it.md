@@ -31,7 +31,7 @@ Click the icon (left or right button) and a small panel slides in by the taskbar
 
 The flyout and the island are glass: you see the desktop behind them, blurred. With **Settings › Personalisation › Colours › Transparency effects** off, they are solid dark grey.
 
-Click anywhere else, or press Esc, to close it. The icon is amber while HDR is on and grey in SDR. Amber always means HDR; the Windows accent colour isn't used.
+Click anywhere else, or press Esc, to close it. It works from the keyboard too: **Tab** or the arrow keys move between controls (a ring shows where you are), **Enter** or **Space** presses one, **Backspace** goes back from a game's resolution view. Screen readers such as Narrator and NVDA read each control's name and state. The icon is amber while HDR is on and grey in SDR. Amber always means HDR; the Windows accent colour isn't used.
 
 ## The island
 

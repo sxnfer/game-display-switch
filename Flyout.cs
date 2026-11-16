@@ -56,6 +56,9 @@ namespace HdrSwitch
                 public bool InCard;    // inside the status card: clipped to its height while that animates
                 public bool Grows;     // the status card itself: its height is the animated one
                 public bool Below;     // below the status card: moves with its height while that animates
+                public string Name;    // what a screen reader says (the tooltip when not set)
+                public AccessibleRole Role = AccessibleRole.PushButton;
+                public bool Selected;  // a switch that is on, the chosen row: "checked" for a screen reader
             }
 
             readonly TrayApp app;
@@ -72,6 +75,9 @@ namespace HdrSwitch
             double fade = 1;         // the window's alpha: 0 → 1 as it opens
             int scroll, scrollMax, rowH;
             int hover = -1, pressed = -1;
+            int focus = -1;       // the item the keyboard is on (Tab, arrows; Enter or Space presses it)
+            string focusKey;      // … kept by key across a rebuild
+            bool keyboard;        // the focus ring shows: the keyboard was used since the mouse last moved
             bool picking;     // the list shows running programs to add, instead of the games
             string choosing;  // the list shows the resolutions for this game, instead of the games
             bool stretching;  // choosing: the list shows the game's own resolutions, to stretch over its competitive one
@@ -140,6 +146,9 @@ namespace HdrSwitch
                 }
                 bool wasVisible = Visible;   // caught while closing: it turns round from where it is
                 closing = false;
+                focus = -1;
+                focusKey = null;
+                keyboard = false;
                 ScrollHome();
                 thumb.Snap(0);
                 Rebuild();
@@ -249,8 +258,178 @@ namespace HdrSwitch
 
             protected override bool ProcessDialogKey(Keys keyData)
             {
-                if (keyData == Keys.Escape) { Dismiss(false); return true; }
+                switch (keyData)
+                {
+                    case Keys.Escape: Dismiss(false); return true;
+                    case Keys.Tab: case Keys.Down: case Keys.Right: MoveFocus(1); return true;
+                    case Keys.Shift | Keys.Tab: case Keys.Up: case Keys.Left: MoveFocus(-1); return true;
+                    case Keys.Home: MoveFocus(0); return true;
+                    case Keys.Enter: Press(); return true;
+                    case Keys.Back:
+                        int back = items.FindIndex(it => it.Key == "back");
+                        if (back >= 0) items[back].Click();
+                        return true;
+                }
                 return base.ProcessDialogKey(keyData);
+            }
+
+            protected override void OnKeyDown(KeyEventArgs e)
+            {
+                base.OnKeyDown(e);
+                if (e.KeyCode == Keys.Space) { Press(); e.Handled = true; }
+            }
+
+            // ---- keyboard ----
+
+            bool Focusable(int i) { return i >= 0 && i < items.Count && items[i].Click != null && !closing; }
+
+            /// <summary>To the next (1) or previous (-1) control, round and round; 0: the first one.</summary>
+            void MoveFocus(int dir)
+            {
+                var order = Enumerable.Range(0, items.Count).Where(Focusable).ToList();
+                if (order.Count == 0) return;
+                int at = order.IndexOf(focus);
+                int next = dir == 0 || at < 0 ? (dir < 0 ? order.Count - 1 : 0) : (at + dir + order.Count) % order.Count;
+                SetFocus(order[next]);
+            }
+
+            void SetFocus(int i)
+            {
+                if (!Focusable(i)) return;
+                focus = i;
+                focusKey = items[i].Key;
+                keyboard = true;
+                ScrollInto(items[i]);
+                Invalidate();
+                int child = AccessibleItems().IndexOf(i);
+                if (child >= 0) AccessibilityNotifyClients(AccessibleEvents.Focus, child);
+            }
+
+            void Press()
+            {
+                if (!Focusable(focus)) return;
+                keyboard = true;
+                items[focus].Click();
+            }
+
+            /// <summary>Scrolls the list so a row the keyboard moved to is in view.</summary>
+            void ScrollInto(Item it)
+            {
+                if (!it.Scrolls) return;
+                double to = scrollTo.Target;
+                if (it.Rect.Top - to < listClip.Top) to = it.Rect.Top - listClip.Top;
+                else if (it.Rect.Bottom - to > listClip.Bottom) to = it.Rect.Bottom - listClip.Bottom;
+                to = Math.Max(0, Math.Min(scrollMax, to));
+                if (to == scrollTo.Target) return;
+                scrollTo.To(to);
+                Motion.Run(tick);
+                if (Motion.Reduced) Tick(0);
+            }
+
+            /// <summary>The ring round the item the keyboard is on.</summary>
+            void FocusRing(Graphics g)
+            {
+                if (!keyboard || !Focusable(focus)) return;
+                var it = items[focus];
+                var r = RectangleF.Inflate(OnScreen(it), S(2), S(2));
+                var state = g.Save();
+                if (it.Scrolls) g.SetClip(RectangleF.Inflate(ListNow(), 0, S(2)), CombineMode.Intersect);
+                float radius = Math.Min(r.Height / 2f, S(20));
+                using (var pen = new Pen(Theme.Fade(Theme.Text1, 0.9), Math.Max(2f, 2 * k)))
+                using (var p = Theme.Round(r, radius)) g.DrawPath(pen, p);
+                g.Restore(state);
+            }
+
+            // ---- screen readers ----
+            //
+            // Everything here is painted, so Windows sees one window and nothing in it. The accessible object below gives
+            // screen readers (Narrator, NVDA) each control instead: its name, its role, whether it is on, where it is, and a
+            // default action that clicks it. Moving the keyboard focus tells them which one has it.
+
+            /// <summary>The items a screen reader is told about, in order: every control and the status card.</summary>
+            List<int> AccessibleItems()
+            {
+                var list = new List<int>();
+                for (int i = 0; i < items.Count; i++)
+                    if ((items[i].Click != null || items[i].Role == AccessibleRole.StaticText) && (items[i].Name ?? items[i].Tip) != null) list.Add(i);
+                return list;
+            }
+
+            protected override AccessibleObject CreateAccessibilityInstance() { return new PanelAccess(this); }
+
+            sealed class PanelAccess : ControlAccessibleObject
+            {
+                readonly Flyout f;
+                public PanelAccess(Flyout f) : base(f) { this.f = f; }
+                public override string Name { get { return "Display Switch"; } }
+                public override AccessibleRole Role { get { return AccessibleRole.Dialog; } }
+                public override int GetChildCount() { return f.AccessibleItems().Count; }
+
+                public override AccessibleObject GetChild(int index)
+                {
+                    var list = f.AccessibleItems();
+                    return index >= 0 && index < list.Count ? new ItemAccess(f, list[index], this) : null;
+                }
+
+                public override AccessibleObject GetFocused()
+                {
+                    return f.Focusable(f.focus) ? new ItemAccess(f, f.focus, this) : (AccessibleObject)this;
+                }
+            }
+
+            sealed class ItemAccess : AccessibleObject
+            {
+                readonly Flyout f;
+                readonly int index;
+                readonly AccessibleObject parent;
+                readonly Item item;   // the item as it was asked for: a rebuild since makes this one stale, not wrong
+
+                public ItemAccess(Flyout f, int index, AccessibleObject parent)
+                {
+                    this.f = f;
+                    this.index = index;
+                    this.parent = parent;
+                    item = f.items[index];
+                }
+
+                bool Live { get { return index < f.items.Count && ReferenceEquals(f.items[index], item); } }
+                public override string Name { get { return item.Name ?? item.Tip; } }
+                public override string Description { get { return item.Name != null ? item.Tip : null; } }
+                public override AccessibleRole Role { get { return item.Role; } }
+                public override AccessibleObject Parent { get { return parent; } }
+
+                public override AccessibleStates State
+                {
+                    get
+                    {
+                        if (!Live) return AccessibleStates.Unavailable;
+                        var st = AccessibleStates.None;
+                        if (item.Click != null) st |= AccessibleStates.Focusable;
+                        else if (item.Role != AccessibleRole.StaticText) st |= AccessibleStates.Unavailable;   // the update button while busy
+                        if (f.focus == index) st |= AccessibleStates.Focused;
+                        if (item.Selected) st |= AccessibleStates.Checked;
+                        if (item.Busy) st |= AccessibleStates.Busy;
+                        if (item.Scrolls && !f.ListNow().IntersectsWith(f.OnScreen(item))) st |= AccessibleStates.Offscreen;
+                        return st;
+                    }
+                }
+
+                public override Rectangle Bounds { get { return Live ? f.RectangleToScreen(f.OnScreen(item)) : Rectangle.Empty; } }
+
+                public override string DefaultAction
+                {
+                    get { return item.Click == null ? null : item.Role == AccessibleRole.CheckButton ? "Toggle" : "Press"; }
+                }
+
+                public override void DoDefaultAction()
+                {
+                    if (Live && item.Click != null) f.BeginInvoke(item.Click);   // not inside the screen reader's call
+                }
+
+                public override void Select(AccessibleSelection flags)
+                {
+                    if (Live && (flags & AccessibleSelection.TakeFocus) != 0) f.SetFocus(index);
+                }
             }
 
             protected override void Dispose(bool disposing)
@@ -297,7 +476,8 @@ namespace HdrSwitch
                 int h1 = (hasUpdate ? updateY + S(36) + (error != null ? S(8) + errorH : 0) : updateY - S(14)) + CP;
                 var c1 = new Rectangle(M, y, W - 2 * M, h1);
                 RollText titleRoll = Roll("title", title, fonts.Title), subRoll = Roll("sub", sub, fonts.Caption);
-                items.Add(new Item { Rect = c1, Key = "status", On = on, InCard = true, Grows = true, Paint = (g, rc, lk) =>
+                items.Add(new Item { Rect = c1, Key = "status", On = on, InCard = true, Grows = true, Role = AccessibleRole.StaticText,
+                    Name = title + ". " + sub + (notice != null ? ". " + notice : "") + (error != null ? ". " + error : ""), Paint = (g, rc, lk) =>
                 {
                     Glass.Chip(g, rc, S(20), Theme.Chip);
                     Theme.Dot(g, rc.X + CP + S(9), rc.Y + CP + S(22), S(10), Theme.Mix(Theme.Grey, Theme.Amber, lk.On));
@@ -321,7 +501,7 @@ namespace HdrSwitch
                     float fit = !busy ? ur.Width : (failed ? S(18) : S(12) + spin + gap) + roll.TargetWidth + S(18);
                     items.Add(new Item
                     {
-                        Rect = ur, Key = "update", On = busy, Busy = busy && !failed, Width = Math.Min(ur.Width, fit), Shake = failed, InCard = true,
+                        Name = label, Rect = ur, Key = "update", On = busy, Busy = busy && !failed, Width = Math.Min(ur.Width, fit), Shake = failed, InCard = true,
                         Click = busy ? null : (Action)(() => { app.InstallUpdate(); Rebuild(); }),
                         Paint = (g, rc, lk) =>
                         {
@@ -366,7 +546,7 @@ namespace HdrSwitch
                 } });
                 RollText delay = Roll("delay", app.sdrDelay + " s", fonts.Strong);
                 var dr = new Rectangle(c2.X + CP + waitW + S(8), c2.Y + (barH - pillH) / 2, S(64), pillH);
-                items.Add(new Item { Rect = dr, Key = "delay", Tip = "The wait after a game closes, for launchers that restart it. Click for the next one.",
+                items.Add(new Item { Rect = dr, Key = "delay", Name = "Switch back after " + app.sdrDelay + " seconds", Tip = "The wait after a game closes, for launchers that restart it. Click for the next one.",
                     Click = () => { app.SetDelay(NextDelay(app.sdrDelay)); Rebuild(); },
                     Paint = (g, rc, lk) =>
                     {
@@ -379,7 +559,7 @@ namespace HdrSwitch
                 RollText pause = Roll("pause", paused ? "Resume" : "Pause", fonts.Strong);
                 int pauseW = Math.Max(TextRenderer.MeasureText("Resume", fonts.Strong, Size.Empty, TfLeft).Width, TextRenderer.MeasureText("Pause", fonts.Strong, Size.Empty, TfLeft).Width) + S(36);
                 var pr = new Rectangle(c2.Right - CP + S(6) - pauseW, dr.Y, pauseW, pillH);
-                items.Add(new Item { Rect = pr, Key = "pause", On = paused,
+                items.Add(new Item { Rect = pr, Key = "pause", On = paused, Name = paused ? "Resume switching" : "Pause switching",
                     Tip = (paused ? "Switching is paused. " : "Stops all switching until you resume. ") + HotKey.Text + (app.hotkey.Registered ? " does this from anywhere." : " is taken by another program."),
                     Click = () => { app.SetPaused(!app.paused); Rebuild(); },
                     Paint = (g, rc, lk) =>
@@ -444,7 +624,7 @@ namespace HdrSwitch
                 if (picking || choosing != null)
                 {
                     var back = new Rectangle(c3.X + S(8), c3.Y + S(6), S(32), S(32));
-                    items.Add(new Item { Rect = back, Key = "back", Click = () => { if (stretching) stretching = false; else if (brightening) brightening = false; else { picking = false; choosing = null; } ScrollHome(); Rebuild(); },
+                    items.Add(new Item { Rect = back, Key = "back", Name = "Back", Click = () => { if (stretching) stretching = false; else if (brightening) brightening = false; else { picking = false; choosing = null; } ScrollHome(); Rebuild(); },
                         Paint = (g, rc, lk) => Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, Theme.Text1) });
                     string head = picking ? "Add a program" : app.DisplayName(choosing);
                     string headRight = picking ? "" : brightening ? "SDR brightness" : stretching ? "inside " + chosen.Text : "at " + hz + " Hz";
@@ -499,7 +679,7 @@ namespace HdrSwitch
                         bool isMine = app.brightness.TryGetValue(game, out mine) ? mine == level : level < 0;
                         string levelText = level < 0 ? "Windows setting" : level + "";
                         string levelDetail = level < 0 ? "Not changed" : (80 + 4 * level) + " nits";
-                        items.Add(new Item { Rect = rr, Scrolls = true, Key = "bright:" + level, Click = () =>
+                        items.Add(new Item { Rect = rr, Scrolls = true, Key = "bright:" + level, Name = levelText + ", " + levelDetail, Role = AccessibleRole.RadioButton, Selected = isMine, Click = () =>
                         {
                             brightening = false; ScrollHome();
                             app.SetBrightness(game, level);
@@ -523,7 +703,7 @@ namespace HdrSwitch
                             int mine;
                             string brightText = app.brightness.TryGetValue(game, out mine) ? mine + " (" + (80 + 4 * mine) + " nits)" : "Windows setting";
                             bool set = app.brightness.ContainsKey(game);
-                            items.Add(new Item { Rect = rr, Scrolls = true, Key = "mode:bright", Click = () => { brightening = true; ScrollHome(); Rebuild(); }, Paint = (g, rc, lk) =>
+                            items.Add(new Item { Rect = rr, Scrolls = true, Key = "mode:bright", Name = "SDR brightness: " + brightText, Click = () => { brightening = true; ScrollHome(); Rebuild(); }, Paint = (g, rc, lk) =>
                             {
                                 RowBg(g, rc, lk);
                                 Draw(g, "SDR brightness", fonts.Body, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, S(130), rowH), TfLeft);
@@ -537,7 +717,7 @@ namespace HdrSwitch
                             // Opens the list of resolutions the game itself can run at, stretched over this one.
                             Resolution.Mode ownNow = app.StretchOf(game);
                             string ownText = ownNow == null ? "Not stretched" : ownNow.Text + ", stretched";
-                            items.Add(new Item { Rect = rr, Scrolls = true, Key = "mode:stretch", Click = () => { stretching = true; ScrollHome(); Rebuild(); }, Paint = (g, rc, lk) =>
+                            items.Add(new Item { Rect = rr, Scrolls = true, Key = "mode:stretch", Name = "Game resolution: " + ownText, Click = () => { stretching = true; ScrollHome(); Rebuild(); }, Paint = (g, rc, lk) =>
                             {
                                 RowBg(g, rc, lk);
                                 Draw(g, "Game resolution", fonts.Body, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, S(130), rowH), TfLeft);
@@ -553,7 +733,7 @@ namespace HdrSwitch
                             bool isOwn = m == null ? ownNow == null : ownNow != null && m.Width == ownNow.Width && m.Height == ownNow.Height;
                             string ownLabel = m == null ? "Not stretched" : m.Text;
                             string ownDetail = m == null ? "" : AspectText(m);
-                            items.Add(new Item { Rect = rr, Scrolls = true, Key = key, Click = () =>
+                            items.Add(new Item { Rect = rr, Scrolls = true, Key = key, Name = ownLabel + (ownDetail.Length > 0 ? ", " + ownDetail : ""), Role = AccessibleRole.RadioButton, Selected = isOwn, Click = () =>
                             {
                                 stretching = false; choosing = null; ScrollHome();
                                 app.SetStretch(game, m);
@@ -571,7 +751,7 @@ namespace HdrSwitch
                         bool isChosen = m == null ? chosen == null : chosen != null && m.Width == chosen.Width && m.Height == chosen.Height;
                         string label = m == null ? "Off" : m.Text;
                         string detail = m == null ? (full == null ? "" : "Full screen") : SizeText(m, full, inches);
-                        items.Add(new Item { Rect = rr, Scrolls = true, Key = key, Click = () =>
+                        items.Add(new Item { Rect = rr, Scrolls = true, Key = key, Name = label + (detail.Length > 0 ? ", " + detail : ""), Role = AccessibleRole.RadioButton, Selected = isChosen, Click = () =>
                         {
                             choosing = null; ScrollHome();
                             app.SetProfile(game, m == null ? null : new Resolution.Mode { Width = m.Width, Height = m.Height, Hz = keepHz });
@@ -587,7 +767,7 @@ namespace HdrSwitch
                     }
                     string name = names[i];
                     if (picking)
-                        items.Add(new Item { Rect = rr, Scrolls = true, Key = "pick:" + name, Click = () => { app.Add(name); picking = false; ScrollHome(); Rebuild(); }, Paint = (g, rc, lk) =>
+                        items.Add(new Item { Rect = rr, Scrolls = true, Key = "pick:" + name, Name = "Add " + name + ".exe", Click = () => { app.Add(name); picking = false; ScrollHome(); Rebuild(); }, Paint = (g, rc, lk) =>
                         {
                             RowBg(g, rc, lk);
                             Draw(g, name + ".exe", fonts.Body, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, rc.Width - 2 * CP - S(24), rowH), TfLeft);
@@ -603,7 +783,8 @@ namespace HdrSwitch
                         int capW = cap == null ? 0 : TextRenderer.MeasureText(cap, fonts.Caption, new Size(int.MaxValue, rowH), TfCaption).Width + S(10);
                         int monX = rr.Right - CP - S(44) - S(6) - S(32);   // the monitor symbol, left of the switch
                         var mon = new Rectangle(monX, rr.Y + (rowH - S(32)) / 2, S(32), S(32));
-                        items.Add(new Item { Rect = rr, Scrolls = true, Key = "row:" + name, On = isOn, Click = () => { if (app.games.Contains(name)) app.Remove(name); else app.Add(name); Rebuild(); }, Paint = (g, rc, lk) =>
+                        items.Add(new Item { Rect = rr, Scrolls = true, Key = "row:" + name, On = isOn, Role = AccessibleRole.CheckButton, Selected = isOn,
+                            Name = app.DisplayName(name) + ", HDR" + (cap != null ? ", " + cap : ""), Click = () => { if (app.games.Contains(name)) app.Remove(name); else app.Add(name); Rebuild(); }, Paint = (g, rc, lk) =>
                         {
                             RowBg(g, rc, lk);
                             int right = rc.X + (monX - rr.X) - S(4);
@@ -612,7 +793,7 @@ namespace HdrSwitch
                             Theme.Switch(g, new RectangleF(rc.Right - CP - S(44), rc.Y + (rowH - S(26)) / 2f, S(44), S(26)), lk.On, lk.Hover);
                         } });
                         // The monitor symbol opens the game's resolution and brightness view; white when it has either.
-                        items.Add(new Item { Rect = mon, Scrolls = true, Key = "mon:" + name, Tip = "Resolution and SDR brightness", Click = () => { choosing = name; stretching = false; brightening = false; ScrollHome(); Rebuild(); },
+                        items.Add(new Item { Rect = mon, Scrolls = true, Key = "mon:" + name, Tip = "Resolution and SDR brightness", Name = "Resolution and SDR brightness for " + app.DisplayName(name), Click = () => { choosing = name; stretching = false; brightening = false; ScrollHome(); Rebuild(); },
                             Paint = (g, rc, lk) => Button(g, rc, lk, Theme.None, "", fonts.Glyph, prof != null || app.brightness.ContainsKey(name) ? Theme.Text1 : Theme.Mix(Theme.Text3, Theme.Text1, lk.Hover)) });
                     }
                 }
@@ -633,7 +814,7 @@ namespace HdrSwitch
                 int exitW = TextRenderer.MeasureText("Exit", fonts.Body, Size.Empty, TfLeft).Width + S(32);
                 var exit = new Rectangle(W - M - exitW, y, exitW, S(32));
                 items.Add(new Item { Rect = new Rectangle(M + S(4), y, exit.X - M - S(48), S(32)), Paint = (g, rc, lk) => Draw(g, version, fonts.Caption, Theme.Text3, rc, TfLeft) });
-                items.Add(new Item { Rect = exit, Key = "exit", Click = () => app.ExitThread(), Paint = (g, rc, lk) =>
+                items.Add(new Item { Rect = exit, Key = "exit", Name = "Exit Display Switch", Click = () => app.ExitThread(), Paint = (g, rc, lk) =>
                 {
                     Theme.Fill(g, rc, rc.Height / 2f, Theme.Mix(Theme.Mix(Theme.Raised, Theme.Hover, lk.Hover), Theme.Press, lk.Press));
                     Glass.Edge(g, rc, rc.Height / 2f, 1);
@@ -682,6 +863,8 @@ namespace HdrSwitch
 
                 ClientSize = new Size(W, contentH + Grow);
                 pressed = -1;
+                focus = focusKey == null ? -1 : items.FindIndex(it => it.Key == focusKey && it.Click != null);
+                if (focus < 0 && focusKey != null && keyboard) MoveFocus(0);   // its control went (a view changed): start at the top
                 if (Visible)
                 {
                     final = Corner(out slide);
@@ -745,7 +928,7 @@ namespace HdrSwitch
             void AddTile(Rectangle r, string key, string icon, string label, bool on, string tipText, Action click)
             {
                 RollText state = Roll("tile:" + key, on ? "On" : "Off", fonts.Caption);
-                items.Add(new Item { Rect = r, Key = "tile:" + key, On = on, Tip = tipText, Click = click, Paint = (g, rc, lk) =>
+                items.Add(new Item { Rect = r, Key = "tile:" + key, On = on, Tip = tipText, Name = label, Role = AccessibleRole.CheckButton, Selected = on, Click = click, Paint = (g, rc, lk) =>
                 {
                     Color rest = Theme.Mix(Theme.Chip, Theme.Lit, lk.On);
                     Color over = Theme.Mix(Theme.ChipHover, Theme.LitHover, lk.On), down = Theme.Mix(Theme.Press, Theme.LitPress, lk.On);
@@ -822,6 +1005,7 @@ namespace HdrSwitch
                     float thumbY = list.Y + S(4) + (trackH - thumbH) * (float)Math.Max(0, Math.Min(scrollMax, scrollTo.Value)) / scrollMax;
                     Theme.Fill(g, new RectangleF(list.Right - S(5), thumbY, S(3), thumbH), S(3) / 2f, Theme.Fade(Color.FromArgb(150, 255, 255, 255), thumb.Value));
                 }
+                FocusRing(g);
                 Glass.Rim(g, all, S(26));
                 bool blur = Glass.Transparency && fade >= 0.5;
                 if (blur != blurOn) { Glass.SetBlur(Handle, blur); blurOn = blur; }
@@ -975,7 +1159,15 @@ namespace HdrSwitch
                 Aim();
             }
 
-            protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); SetHover(HitTest(e.Location)); }
+            Point lastMouse;
+
+            protected override void OnMouseMove(MouseEventArgs e)
+            {
+                base.OnMouseMove(e);
+                if (keyboard && e.Location != lastMouse) { keyboard = false; Invalidate(); }   // the mouse took over: no ring
+                lastMouse = e.Location;
+                SetHover(HitTest(e.Location));
+            }
             protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); SetHover(-1); }
 
             protected override void OnMouseDown(MouseEventArgs e)
