@@ -53,6 +53,9 @@ namespace HdrSwitch
                 public bool Busy;      // where Look.Busy is heading
                 public float Width;    // where Look.Width is heading (0: not used)
                 public bool Shake;     // gives it a nudge when this turns true
+                public bool InCard;    // inside the status card: clipped to its height while that animates
+                public bool Grows;     // the status card itself: its height is the animated one
+                public bool Below;     // below the status card: moves with its height while that animates
             }
 
             readonly TrayApp app;
@@ -75,6 +78,11 @@ namespace HdrSwitch
             readonly Spring open = Motion.Open(0);           // 0 hidden → 1 in place: slide and fade
             readonly Spring scrollTo = Motion.Scroll(0);     // the wheel moves its target, the list follows
             readonly Spring thumb = Motion.Fade(0);          // the scroll bar: there while scrolling, gone 0.8 s later
+            // The status card's height, in pixels. A hint or an error appearing makes it taller: the card grows, what is
+            // below it moves down and the window grows with it, instead of all of it jumping.
+            readonly Spring cardH = Motion.Shape(0, 0.5);
+            Rectangle card;       // the status card at its full (target) height
+            int contentH;         // the window's height once the card has its full height
             readonly System.Windows.Forms.Timer thumbRest = new System.Windows.Forms.Timer { Interval = 800 };
             readonly Func<double, bool> tick;
             bool closing;
@@ -185,13 +193,14 @@ namespace HdrSwitch
             bool Tick(double dt)
             {
                 if (!Visible) return false;
-                bool moving = open.Step(dt) | scrollTo.Step(dt) | thumb.Step(dt);
+                bool moving = open.Step(dt) | scrollTo.Step(dt) | thumb.Step(dt) | cardH.Step(dt);
                 foreach (var a in anims.Values)
                 {
                     moving |= a.Hover.Step(dt) | a.Press.Step(dt) | a.On.Step(dt) | a.Busy.Step(dt) | a.Width.Step(dt) | a.Shake.Step(dt);
                     if (a.Busy.Value > 0.01) moving = true;   // a spinner keeps turning
                 }
                 foreach (var r in rolls.Values) moving |= r.Step(dt);
+                Fit();
                 Place();
                 if (closing && !open.Moving) { Finish(); return false; }
                 int s = (int)Math.Round(scrollTo.Value);
@@ -286,7 +295,7 @@ namespace HdrSwitch
                 int h1 = (hasUpdate ? updateY + S(36) + (error != null ? S(8) + errorH : 0) : updateY - S(14)) + CP;
                 var c1 = new Rectangle(M, y, W - 2 * M, h1);
                 RollText titleRoll = Roll("title", title, fonts.Title), subRoll = Roll("sub", sub, fonts.Caption);
-                items.Add(new Item { Rect = c1, Key = "status", On = on, Paint = (g, rc, lk) =>
+                items.Add(new Item { Rect = c1, Key = "status", On = on, InCard = true, Grows = true, Paint = (g, rc, lk) =>
                 {
                     Glass.Chip(g, rc, S(20), Theme.Chip);
                     Theme.Dot(g, rc.X + CP + S(9), rc.Y + CP + S(22), S(10), Theme.Mix(Theme.Grey, Theme.Amber, lk.On));
@@ -310,17 +319,20 @@ namespace HdrSwitch
                     float fit = !busy ? ur.Width : (failed ? S(18) : S(12) + spin + gap) + roll.TargetWidth + S(18);
                     items.Add(new Item
                     {
-                        Rect = ur, Key = "update", On = busy, Busy = busy && !failed, Width = Math.Min(ur.Width, fit), Shake = failed,
+                        Rect = ur, Key = "update", On = busy, Busy = busy && !failed, Width = Math.Min(ur.Width, fit), Shake = failed, InCard = true,
                         Click = busy ? null : (Action)(() => { app.InstallUpdate(); Rebuild(); }),
                         Paint = (g, rc, lk) =>
                         {
-                            float w = (float)Math.Max(rc.Height, Math.Min(rc.Width, lk.Width));
+                            // Busy, it is never narrower than its text is right now: the outgoing step's characters
+                            // finish rolling out inside the pill instead of being cut off by it.
+                            float b = (float)Math.Max(0, Math.Min(1, lk.Busy));
+                            float need = lk.On > 0.01 ? roll.Width + b * (spin + gap) + S(36) - b * S(6) : 0;
+                            float w = (float)Math.Max(rc.Height, Math.Min(rc.Width, Math.Max(lk.Width, need)));
                             var pill = new RectangleF(rc.X + (rc.Width - w) / 2 + (float)lk.Shake, rc.Y, w, rc.Height);
                             Color idle = Theme.Mix(Theme.Mix(Theme.Lit, Theme.LitHover, lk.Hover), Theme.LitPress, lk.Press);
                             Color fill = Theme.Mix(idle, Theme.Raised, lk.On);
                             Theme.Fill(g, pill, pill.Height / 2f, fill);
                             Glass.Edge(g, pill, pill.Height / 2f, lk.On);
-                            float b = (float)Math.Max(0, Math.Min(1, lk.Busy));
                             float x = pill.X + (pill.Width - (b * (spin + gap) + roll.Width)) / 2;
                             Theme.Spinner(g, new PointF(x + spin / 2f, pill.Y + pill.Height / 2), spin * (0.6f + 0.4f * b), Math.Max(1.5f, 2 * k), Theme.Text1, b);
                             DrawRollAt(g, roll, fonts.Strong, Theme.Mix(Theme.Ink, Theme.Text1, lk.On), Rectangle.Round(pill), x + b * (spin + gap));
@@ -328,6 +340,8 @@ namespace HdrSwitch
                     });
                 }
                 y = c1.Bottom + G;
+                card = c1;
+                int firstBelow = items.Count;
 
                 // Tiles for the three settings: lit (white) when on.
                 int tileH = S(76), tg = S(8), tw3 = (W - 2 * M - 2 * tg) / 3;
@@ -548,6 +562,11 @@ namespace HdrSwitch
                 }, Paint = (g, rc, lk) => Button(g, rc, lk, Theme.None, "", fonts.Glyph, Theme.Mix(Theme.Text2, Theme.Text1, lk.Hover)) });
                 y += S(32) + M;
 
+                for (int i = firstBelow; i < items.Count; i++) items[i].Below = true;
+                contentH = y;
+                if (Visible && !closing) cardH.To(card.Height);
+                else cardH.Snap(card.Height);
+
                 // The springs follow the new items: kept by key, new ones start where they belong, old ones go.
                 foreach (var a in anims.Values) a.Seen = false;
                 foreach (var it in items)
@@ -575,7 +594,7 @@ namespace HdrSwitch
                 foreach (string gone in anims.Where(kv => !kv.Value.Seen).Select(kv => kv.Key).ToList()) anims.Remove(gone);
                 foreach (string gone in rolls.Where(kv => !kv.Value.Seen).Select(kv => kv.Key).ToList()) rolls.Remove(gone);
 
-                ClientSize = new Size(W, y);
+                ClientSize = new Size(W, contentH + Grow);
                 pressed = -1;
                 if (Visible)
                 {
@@ -682,28 +701,38 @@ namespace HdrSwitch
                 var g = surface.G;
                 g.Clear(Color.Transparent);
                 Glass.Panel(g, all, S(26));
+                var shown = CardNow();
                 for (int i = 0; i < items.Count; i++)
-                    if (!items[i].Scrolls) items[i].Paint(g, items[i].Rect, LookOf(i));
+                {
+                    var it = items[i];
+                    if (it.Scrolls) continue;
+                    if (!it.InCard || Grow == 0) { it.Paint(g, OnScreen(it), LookOf(i)); continue; }
+                    var cs = g.Save();
+                    g.SetClip(shown, CombineMode.Intersect);   // what the card doesn't show yet stays hidden in it
+                    it.Paint(g, it.Grows ? shown : it.Rect, LookOf(i));
+                    g.Restore(cs);
+                }
                 // The list scrolls inside a clip that keeps a half-scrolled row in the card.
-                if (listClip.Width > 0 && listClip.Height > 0)
+                var list = ListNow();
+                if (list.Width > 0 && list.Height > 0)
                 {
                     var state = g.Save();
-                    g.SetClip(listClip, CombineMode.Intersect);
+                    g.SetClip(list, CombineMode.Intersect);
                     for (int i = 0; i < items.Count; i++)
                     {
                         if (!items[i].Scrolls) continue;
                         var r = OnScreen(items[i]);
-                        if (r.Bottom > listClip.Top && r.Top < listClip.Bottom) items[i].Paint(g, r, LookOf(i));
+                        if (r.Bottom > list.Top && r.Top < list.Bottom) items[i].Paint(g, r, LookOf(i));
                     }
                     g.Restore(state);
                 }
                 if (scrollMax > 0 && thumb.Value > 0.01)   // a thin bar that is only there while the list moves
                 {
-                    int content = listClip.Height + scrollMax;
-                    int trackH = listClip.Height - S(8);
-                    int thumbH = Math.Max(S(24), trackH * listClip.Height / content);
-                    float thumbY = listClip.Y + S(4) + (trackH - thumbH) * (float)Math.Max(0, Math.Min(scrollMax, scrollTo.Value)) / scrollMax;
-                    Theme.Fill(g, new RectangleF(listClip.Right - S(5), thumbY, S(3), thumbH), S(3) / 2f, Theme.Fade(Color.FromArgb(150, 255, 255, 255), thumb.Value));
+                    int content = list.Height + scrollMax;
+                    int trackH = list.Height - S(8);
+                    int thumbH = Math.Max(S(24), trackH * list.Height / content);
+                    float thumbY = list.Y + S(4) + (trackH - thumbH) * (float)Math.Max(0, Math.Min(scrollMax, scrollTo.Value)) / scrollMax;
+                    Theme.Fill(g, new RectangleF(list.Right - S(5), thumbY, S(3), thumbH), S(3) / 2f, Theme.Fade(Color.FromArgb(150, 255, 255, 255), thumb.Value));
                 }
                 Glass.Rim(g, all, S(26));
                 bool blur = Glass.Transparency && fade >= 0.5;
@@ -738,7 +767,28 @@ namespace HdrSwitch
                 if (Visible) Motion.Run(tick);
             }
 
-            Rectangle OnScreen(Item it) { return it.Scrolls ? new Rectangle(it.Rect.X, it.Rect.Y - scroll, it.Rect.Width, it.Rect.Height) : it.Rect; }
+            /// <summary>Where an item is right now: scrolled with the list, moved with the status card's height.</summary>
+            Rectangle OnScreen(Item it)
+            {
+                int dy = (it.Scrolls ? -scroll : 0) + (it.Below || it.Scrolls ? Grow : 0);
+                return dy == 0 ? it.Rect : new Rectangle(it.Rect.X, it.Rect.Y + dy, it.Rect.Width, it.Rect.Height);
+            }
+
+            /// <summary>How far the status card's animated height is from its full height: negative while it grows.</summary>
+            int Grow { get { return (int)Math.Round(cardH.Value) - card.Height; } }
+
+            Rectangle CardNow() { return new Rectangle(card.X, card.Y, card.Width, Math.Max(0, card.Height + Grow)); }
+
+            Rectangle ListNow() { return new Rectangle(listClip.X, listClip.Y + Grow, listClip.Width, listClip.Height); }
+
+            /// <summary>The window follows the status card's height. Its bottom stays put by the taskbar, so it grows upwards.</summary>
+            void Fit()
+            {
+                int h = contentH + Grow;
+                if (h == ClientSize.Height || h <= 0) return;
+                ClientSize = new Size(ClientSize.Width, h);
+                final = Corner(out slide);
+            }
 
             /// <summary>A row lights up as a rounded bar under the mouse.</summary>
             void RowBg(Graphics g, Rectangle rc, Look lk)
@@ -822,7 +872,8 @@ namespace HdrSwitch
                 {
                     var it = items[i];
                     if (it.Click == null) continue;
-                    if (it.Scrolls && !listClip.Contains(p)) continue;
+                    if (it.Scrolls && !ListNow().Contains(p)) continue;
+                    if (it.InCard && !CardNow().Contains(p)) continue;
                     if (OnScreen(it).Contains(p)) return i;
                 }
                 return -1;
@@ -860,7 +911,7 @@ namespace HdrSwitch
             protected override void OnMouseWheel(MouseEventArgs e)
             {
                 base.OnMouseWheel(e);
-                if (scrollMax == 0 || closing || !listClip.Contains(e.Location)) return;
+                if (scrollMax == 0 || closing || !ListNow().Contains(e.Location)) return;
                 scrollTo.To(Math.Max(0, Math.Min(scrollMax, scrollTo.Target - Math.Sign(e.Delta) * rowH * 2)));
                 thumb.To(1);
                 thumbRest.Stop();

@@ -67,6 +67,8 @@ namespace HdrSwitch
         readonly StringFormat glyphFmt = new StringFormat(StringFormat.GenericTypographic);   // one character of rolling text, from its top-left
         readonly Dictionary<string, float> glyphW = new Dictionary<string, float>();
         RollText roll;   // the compact text: one compact message turning into the next rolls instead of crossfading
+        readonly Spring dotMix = Motion.Fade(1);   // while the text rolls, the dot turns from dotFrom to dotTo ("SDR in 1s" amber → "SDR" grey)
+        Color dotFrom, dotTo;
 
         float k = 1;
         Theme.Fonts fonts;
@@ -226,6 +228,14 @@ namespace HdrSwitch
             if (wasVisible) prev = leaving || rolls ? null : cur;
             if (rolls) roll.Set(v.Text);
             else roll.Snap(v.Text);
+            if (!rolls) { dotFrom = dotTo = v.Dot; dotMix.Snap(1); }
+            else if (v.Dot.ToArgb() != dotTo.ToArgb())
+            {
+                dotFrom = DotNow();
+                dotTo = v.Dot;
+                dotMix.Snap(0);
+                dotMix.To(1);
+            }
             cur = v;
             leaving = false;
             w.To(tw); h.To(th); r.To(tr); drop.To(0); alpha.To(1);
@@ -268,7 +278,7 @@ namespace HdrSwitch
         bool Tick(double dt)
         {
             if (!Visible) return false;
-            bool moving = w.Step(dt) | h.Step(dt) | r.Step(dt) | drop.Step(dt) | bubble.Step(dt) | alpha.Step(dt) | content.Step(dt) | roll.Step(dt);
+            bool moving = w.Step(dt) | h.Step(dt) | r.Step(dt) | drop.Step(dt) | bubble.Step(dt) | alpha.Step(dt) | content.Step(dt) | roll.Step(dt) | dotMix.Step(dt);
             if (leaving && alpha.Value < 0.02) { Vanish(); return false; }
             Render();
             return moving;
@@ -387,6 +397,10 @@ namespace HdrSwitch
             if (g == null) return;
             g.Clear(Color.Transparent);
             float W = (float)w.Value, H = (float)h.Value, R = (float)Math.Min(r.Value, H / 2), b = (float)Math.Max(0, bubble.Value);
+            // While compact text rolls, the pill is never narrower than the text is right now: the spring would otherwise
+            // reach the new width first and cut off the characters still rolling out.
+            if (cur != null && !cur.Big && prev == null && !leaving && roll.Moving)
+                W = Math.Max(W, Math.Min(size.Width - S(36) - S(6) - S(8), S(12) + S(8) + S(8) + roll.Width + S(16)));
             float bd = S(36), gap = S(6);
             float x = (size.Width - W - b * (gap + bd)) / 2, y = S(10) + (float)drop.Value;
             var pill = new RectangleF(x, y, W, H);
@@ -428,20 +442,22 @@ namespace HdrSwitch
             surface.Present(Handle, Location, alpha.Value);
         }
 
+        Color DotNow() { return Theme.Mix(dotFrom, dotTo, dotMix.Value); }
+
         void Draw(View v, RectangleF pill, double a)
         {
             if (a <= 0.01) return;
             if (v.Big)
             {
                 float tx = pill.X + S(18) + S(10) + S(14), tw = pill.Right - S(24) - tx;
-                Theme.Dot(g, pill.X + S(18) + S(5), pill.Y + pill.Height / 2, S(10), Theme.Fade(v.Dot, a));
+                Theme.Dot(g, pill.X + S(18) + S(5), pill.Y + pill.Height / 2, S(10), Theme.Fade(v == cur ? DotNow() : v.Dot, a));
                 Say(v.Title, fonts.IslandTitle, Theme.Fade(Theme.Text1, a), new RectangleF(tx, pill.Y + S(11), tw, S(22)), fmt);
                 Say(v.Sub, fonts.IslandSub, Theme.Fade(Theme.Text2, a), new RectangleF(tx, pill.Y + S(33), tw, S(20)), fmt);
             }
             else
             {
                 float tx = pill.X + S(12) + S(8) + S(8), tw = pill.Right - S(14) - tx;
-                Theme.Dot(g, pill.X + S(12) + S(4), pill.Y + pill.Height / 2, S(8), Theme.Fade(v.Dot, a));
+                Theme.Dot(g, pill.X + S(12) + S(4), pill.Y + pill.Height / 2, S(8), Theme.Fade(v == cur ? DotNow() : v.Dot, a));
                 if (v == cur && (roll.Moving || roll.TargetWidth <= tw))
                 {
                     float lineH = fonts.IslandText.Height, y = pill.Y + (pill.Height - lineH) / 2;

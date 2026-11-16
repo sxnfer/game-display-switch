@@ -173,6 +173,14 @@ namespace HdrSwitch.Tests
             Run.Equal(3, Drawn(r).Count, "a surrogate pair is drawn as one character");
         }
 
+        public static void ColourMix()
+        {
+            var amber = Theme.Amber;
+            Run.Equal(amber.ToArgb(), Theme.Mix(amber, Theme.Grey, 0).ToArgb(), "t = 0 is the first colour");
+            Run.Equal(Theme.Grey.ToArgb(), Theme.Mix(amber, Theme.Grey, 1).ToArgb(), "t = 1 is the second");
+            Run.Equal(Theme.Grey.ToArgb(), Theme.Mix(amber, Theme.Grey, 1.08).ToArgb(), "a spring's overshoot is clamped");
+        }
+
         // ---- game lists and launcher records ----
 
         public static void NormalizeExeNames()
