@@ -83,6 +83,8 @@ namespace HdrSwitch
         static readonly string ProfilesFile = Path.Combine(Dir, "resolutions.txt");
         static readonly string StateFile = Path.Combine(Dir, "resolution.state");   // the mode this app set – for crash recovery
         static readonly string RecordersFile = Path.Combine(Dir, "recorders.txt");
+        static readonly string BrightnessFile = Path.Combine(Dir, "brightness.txt");
+        static readonly string BrightStateFile = Path.Combine(Dir, "brightness.state");   // the level this app set – for crash recovery
 
         sealed class Running { public string Name; public RegisteredWaitHandle Wait; public WaitHandle Handle; }
         sealed class ActiveMode
@@ -165,6 +167,7 @@ namespace HdrSwitch
             LoadList();
             LoadProfiles();
             LoadRecorders();
+            LoadBrightness();
             flyout = new Flyout(this);
             // Clicks pass through the island while a game runs or is about to start.
             island = new Island(() => flyout.Toggle(), () => running.Count > 0 || steamTimeout.Enabled, IslandScreen, Notify, Trim);
@@ -176,7 +179,7 @@ namespace HdrSwitch
             sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); Settle(); };
             scanTimer.Tick += (s, e) => { Rescan(); island.Poll(); };
             steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); Settle(); };
-            reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); LoadRecorders(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
+            reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); LoadRecorders(); LoadBrightness(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
             modeCheck.Tick += (s, e) => { modeCheck.Stop(); OnDisplayChanged(false); };
 
             watcher = new FileSystemWatcher(Dir, "*.txt") { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size };
@@ -192,6 +195,7 @@ namespace HdrSwitch
             SystemEvents.DisplaySettingsChanged += onDisplayChanged;
 
             RecoverResolution();   // a previous run was killed while a game had its resolution
+            RecoverBrightness();   // … or its SDR brightness
             Rescan();              // games that were already running
             if (!ProfiledRunning())
             {
@@ -435,6 +439,7 @@ namespace HdrSwitch
             if (!HdrRunning() && owned.Count > 0)
             {
                 bool ours = InOurMode();
+                RestoreBrightness();
                 foreach (var d in owned) Hdr.Set(d, false);
                 owned.Clear();
                 if (ours) KeepMode();   // a game with only a resolution may still be running
@@ -507,7 +512,8 @@ namespace HdrSwitch
                 if (owned.Count > 0)
                 {
                     bool ours = InOurMode();
-                    foreach (var d in owned) Hdr.Set(d, false);
+                    RestoreBrightness();
+                foreach (var d in owned) Hdr.Set(d, false);
                     owned.Clear();
                     if (ours) KeepMode();
                     Announce(new Island.Act { Id = "rec", Text = RecorderName(name) + " · SDR", Dot = Theme.Grey, Split = true, Bubble = Theme.Rec, Seconds = 4,
@@ -546,6 +552,7 @@ namespace HdrSwitch
                 island.End("sdr");
                 RevertResolution();
                 RestoreStrayScaling();
+                RestoreBrightness();
                 foreach (var d in owned) Hdr.Set(d, false);
                 owned.Clear();
                 Announce(new Island.Act { Id = "pause", Text = "Paused", Dot = Theme.Grey, Seconds = 2,
@@ -1036,6 +1043,138 @@ namespace HdrSwitch
             ReapplyProfiles();
         }
 
+        // ---- SDR brightness per game ----
+        //
+        // Windows' "SDR content brightness" slider sets how bright everything that isn't HDR looks while HDR is on: the
+        // desktop, SDR games, a game's own SDR menus. A game can have its own level (brightness.txt, or the flyout). While
+        // it runs with HDR on, the display gets that level; afterwards the level from before comes back – only if it is
+        // still the one this app set, as with resolutions. Reading the level is documented; setting it is not, and uses
+        // the same call as Windows' own slider (see Hdr.SetSdrWhite).
+
+        Dictionary<string, int> brightness = new Dictionary<string, int>();   // name → slider position 0…100
+        string brightKey;      // the display whose level this app changed
+        int brightBack = -1;   // its level before (raw, see Hdr.SdrWhite), or -1: nothing changed
+        int brightSet = -1;    // the level this app set
+
+        /// <summary>The level a running game asks for, as a slider position, or -1.</summary>
+        int WantedBrightness()
+        {
+            if (paused) return -1;
+            foreach (var r in running.Values)
+            {
+                int p;
+                if (brightness.TryGetValue(r.Name, out p)) return p;
+            }
+            return -1;
+        }
+
+        /// <summary>Gives the HDR display the level a running game wants, or puts the old one back once none does.</summary>
+        void SyncBrightness()
+        {
+            int want = WantedBrightness();
+            var d = want < 0 ? null : Hdr.Primary();
+            if (d == null || !d.On) { RestoreBrightness(); return; }
+            if (brightBack >= 0 && brightKey != d.Key) RestoreBrightness();   // another display now
+            int now = Hdr.SdrWhite(d), level = Hdr.LevelOf(want);
+            if (now < 0) return;   // not readable: leave it alone
+            if (brightBack < 0) { brightBack = now; brightKey = d.Key; }
+            if (now != level && !Hdr.SetSdrWhite(d, level)) { brightBack = -1; return; }
+            if (brightSet != level) { brightSet = level; WriteBrightState(); }
+        }
+
+        /// <summary>The level from before, if the display still has the one this app set.</summary>
+        void RestoreBrightness()
+        {
+            if (brightBack < 0) return;
+            var d = Hdr.All().FirstOrDefault(x => x.Key == brightKey);
+            if (d != null && Hdr.SdrWhite(d) == brightSet) Hdr.SetSdrWhite(d, brightBack);
+            brightBack = brightSet = -1;
+            brightKey = null;
+            try { File.Delete(BrightStateFile); } catch (IOException) { }
+        }
+
+        void WriteBrightState()
+        {
+            try { File.WriteAllText(BrightStateFile, brightKey + "|" + brightBack + "|" + brightSet); } catch (IOException) { }
+        }
+
+        /// <summary>A previous run ended while a game had its level: take it over, so the next sync puts it back.</summary>
+        void RecoverBrightness()
+        {
+            try
+            {
+                if (!File.Exists(BrightStateFile)) return;
+                string[] f = File.ReadAllText(BrightStateFile).Trim().Split('|');
+                int back, set;
+                if (f.Length == 3 && int.TryParse(f[1], out back) && int.TryParse(f[2], out set) && back >= 0)
+                {
+                    brightKey = f[0];
+                    brightBack = back;
+                    brightSet = set;
+                    RestoreBrightness();   // a game that still runs gets its level again with the first sync
+                }
+                else File.Delete(BrightStateFile);
+            }
+            catch (IOException) { }
+        }
+
+        void LoadBrightness()
+        {
+            if (!File.Exists(BrightnessFile)) SaveBrightness();
+            string[] lines;
+            try { lines = File.ReadAllLines(BrightnessFile); }
+            catch (IOException) { return; }   // file busy (being saved) – the watcher fires again
+            brightness = ParseBrightness(lines);
+        }
+
+        /// <summary>"cyberpunk2077.exe  60  # note" → cyberpunk2077: 60. A level is Windows' slider position, 0…100.</summary>
+        internal static Dictionary<string, int> ParseBrightness(IEnumerable<string> lines)
+        {
+            var all = new Dictionary<string, int>();
+            foreach (string raw in lines)
+            {
+                string line = raw;
+                int hash = line.IndexOf('#');
+                if (hash >= 0) line = line.Substring(0, hash);
+                var m = BrightnessLine.Match(line.Trim());
+                if (!m.Success) continue;
+                string name = Proc.Normalize(m.Groups[1].Value);
+                int p = int.Parse(m.Groups[2].Value);
+                if (name != null && p <= 100) all[name] = p;
+            }
+            return all;
+        }
+
+        static readonly Regex BrightnessLine = new Regex(@"^(.+?)\s+(\d{1,3})\s*%?$");
+
+        void SaveBrightness()
+        {
+            var lines = new List<string>
+            {
+                "# Display Switch - SDR content brightness per game: Windows' slider of that name (0-100), set while the game",
+                "# runs with HDR on and put back when it closes. It decides how bright the desktop, SDR games and a game's",
+                "# SDR menus look in HDR. One game per line: exe and level. Text after # is a note. Easier: the flyout's",
+                "# monitor symbol next to a game, then SDR brightness.",
+                ""
+            };
+            lines.AddRange(brightness.Keys.OrderBy(LabelOf, StringComparer.OrdinalIgnoreCase).Select(g =>
+            {
+                string line = (g + ".exe").PadRight(35) + " " + brightness[g];
+                string l = LabelOf(g);
+                return l == g ? line : line.PadRight(41) + " # " + l;
+            }));
+            try { File.WriteAllLines(BrightnessFile, lines, Encoding.UTF8); } catch (IOException) { }
+        }
+
+        /// <summary>From the flyout: this game's level (-1: Windows' own). Saved, and applied right away if the game runs.</summary>
+        void SetBrightness(string name, int percent)
+        {
+            if (percent < 0) brightness.Remove(name);
+            else brightness[name] = Math.Min(100, percent);
+            SaveBrightness();
+            UpdateTray();
+        }
+
         // ---- recording apps ----
 
         void LoadRecorders()
@@ -1257,6 +1396,7 @@ namespace HdrSwitch
 
         void UpdateTray()
         {
+            SyncBrightness();   // every change of state comes through here
             tray.Icon = Hdr.All().Any(d => d.On) ? iconOn : iconOff;
             string text = "Display Switch " + Updater.CurrentText + "\n" + StatusText();
             tray.Text = text.Length > 63 ? text.Substring(0, 62) + "…" : text;   // NotifyIcon limit
@@ -2021,6 +2161,32 @@ namespace HdrSwitch
             return hdr.FirstOrDefault(d => d.Gdi == Screen.PrimaryScreen.DeviceName) ?? hdr.FirstOrDefault();
         }
 
+        /// <summary>
+        /// The display's SDR white level – Windows' "SDR content brightness" – in its raw unit (1000 = 80 nits), or -1.
+        /// </summary>
+        public static int SdrWhite(Display d)
+        {
+            var w = new SdrWhiteLevel { H = Header(11, typeof(SdrWhiteLevel), d.Adapter, d.Target) };   // GET_SDR_WHITE_LEVEL
+            return DisplayConfigGetDeviceInfo(ref w) == 0 ? (int)w.Level : -1;
+        }
+
+        /// <summary>
+        /// Sets the SDR white level. Not in Windows' documentation: device info type 0xFFFFFFEE is what the Settings slider
+        /// itself uses (also used by tools such as Twinkle Tray), with "final" meaning the value is kept, not a preview.
+        /// </summary>
+        public static bool SetSdrWhite(Display d, int level)
+        {
+            var s = new SetSdrWhiteLevel { H = Header(unchecked((int)0xFFFFFFEE), typeof(SetSdrWhiteLevel), d.Adapter, d.Target), Level = (uint)level, Final = 1 };
+            try { return DisplayConfigSetDeviceInfo(ref s) == 0; }
+            catch (EntryPointNotFoundException) { return false; }
+        }
+
+        /// <summary>Slider position 0…100 → raw level: the slider runs from 80 to 480 nits, and 1000 is 80 nits.</summary>
+        public static int LevelOf(int percent) { return 1000 + 50 * Math.Max(0, Math.Min(100, percent)); }
+
+        /// <summary>Raw level → slider position 0…100.</summary>
+        public static int PercentOf(int level) { return Math.Max(0, Math.Min(100, (int)Math.Round((level - 1000) / 50.0))); }
+
         public static bool Set(Display d, bool on)
         {
             // Windows 11 24H2+: SET_HDR_STATE. Older Windows: SET_ADVANCED_COLOR_STATE.
@@ -2069,6 +2235,8 @@ namespace HdrSwitch
         [StructLayout(LayoutKind.Sequential)] struct ColorInfo { public DeviceInfoHeader H; public uint Value; public uint Encoding; public uint Bits; }
         [StructLayout(LayoutKind.Sequential)] struct ColorInfo2 { public DeviceInfoHeader H; public uint Value; public uint Encoding; public uint Bits; public uint ActiveColorMode; }
         [StructLayout(LayoutKind.Sequential)] struct SetState { public DeviceInfoHeader H; public uint Value; }
+        [StructLayout(LayoutKind.Sequential)] struct SdrWhiteLevel { public DeviceInfoHeader H; public uint Level; }
+        [StructLayout(LayoutKind.Sequential)] struct SetSdrWhiteLevel { public DeviceInfoHeader H; public uint Level; public byte Final; }
 
         [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPaths, out uint numModes);
         [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint numPaths, [Out] PathInfo[] paths, ref uint numModes, IntPtr modes, IntPtr topology);
@@ -2076,6 +2244,8 @@ namespace HdrSwitch
         [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref ColorInfo info);
         [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref ColorInfo2 info);
         [DllImport("user32.dll")] static extern int DisplayConfigSetDeviceInfo(ref SetState info);
+        [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref SdrWhiteLevel info);
+        [DllImport("user32.dll")] static extern int DisplayConfigSetDeviceInfo(ref SetSdrWhiteLevel info);
     }
 
     static class Native

@@ -282,6 +282,26 @@ namespace HdrSwitch.Tests
             Run.Equal(600, TrayApp.ValidDelay(100000), "at most 10 minutes");
         }
 
+        public static void BrightnessLines()
+        {
+            var b = TrayApp.ParseBrightness(new[] { "# note", "Cyberpunk2077.exe  60", "cs2.exe 35%  # Counter-Strike 2", "bad.exe 140", "nolevel.exe", "" });
+            Run.Equal(60, b["cyberpunk2077"], "a level");
+            Run.Equal(35, b["cs2"], "with % and a note");
+            Run.True(!b.ContainsKey("bad"), "above 100 is ignored");
+            Run.True(!b.ContainsKey("nolevel"), "a line without a level is ignored");
+            Run.Equal(2, b.Count, "nothing else");
+        }
+
+        public static void BrightnessLevels()
+        {
+            Run.Equal(1000, Hdr.LevelOf(0), "0 is 80 nits");
+            Run.Equal(6000, Hdr.LevelOf(100), "100 is 480 nits");
+            Run.Equal(3000, Hdr.LevelOf(40), "40 is 240 nits");
+            Run.Equal(40, Hdr.PercentOf(Hdr.LevelOf(40)), "and back");
+            Run.Equal(0, Hdr.PercentOf(500), "below the slider");
+            Run.Equal(100, Hdr.LevelOf(250) == 6000 ? 100 : -1, "clamped at 100");
+        }
+
         // ---- updates ----
 
         const string ReleaseJson = "{\"tag_name\":\"v1.7.0\",\"assets\":["

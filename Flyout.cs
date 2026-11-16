@@ -75,6 +75,7 @@ namespace HdrSwitch
             bool picking;     // the list shows running programs to add, instead of the games
             string choosing;  // the list shows the resolutions for this game, instead of the games
             bool stretching;  // choosing: the list shows the game's own resolutions, to stretch over its competitive one
+            bool brightening; // choosing: the list shows the SDR brightness levels for the game
             readonly Spring open = Motion.Open(0);           // 0 hidden → 1 in place: slide and fade
             readonly Spring scrollTo = Motion.Scroll(0);     // the wheel moves its target, the list follows
             readonly Spring thumb = Motion.Fade(0);          // the scroll bar: there while scrolling, gone 0.8 s later
@@ -126,6 +127,7 @@ namespace HdrSwitch
                 picking = false;
                 choosing = null;
                 stretching = false;
+                brightening = false;
                 Motion.Refresh();
                 Glass.Refresh();
                 float scale = Theme.Scale(Cursor.Position);
@@ -396,6 +398,7 @@ namespace HdrSwitch
                 rowH = S(44);
                 var names = new List<string>();
                 var modes = new List<Resolution.Mode>();   // choosing: null for "Off", then the display's sizes
+                var levels = new List<int>();              // brightening: -1 for Windows' own, then 0…100
                 Resolution.Mode chosen = null, full = null;
                 double inches = 0;
                 int hz = 0;
@@ -410,7 +413,12 @@ namespace HdrSwitch
                     full = pic != null ? new Resolution.Mode { Width = pic.TargetW, Height = pic.TargetH, Hz = hz } : cur;
                     inches = Resolution.Inches(gdi);
                     if (chosen == null) stretching = false;   // nothing to stretch over
-                    if (stretching)
+                    if (brightening)
+                    {
+                        levels.Add(-1);
+                        for (int p = 0; p <= 100; p += 10) levels.Add(p);
+                    }
+                    else if (stretching)
                     {
                         // The game's own resolution: the sizes that lie inside the competitive one, which the GPU stretches over it.
                         modes.Add(null);
@@ -418,16 +426,17 @@ namespace HdrSwitch
                     }
                     else
                     {
+                        modes.Add(BrightRow);
                         if (chosen != null) modes.Add(StretchRow);
                         modes.Add(null);
                     }
-                    if (!stretching && full != null)
+                    if (!stretching && !brightening && full != null)
                         modes.AddRange(Resolution.Modes(gdi, hz)
                             .Where(m => m.Width < full.Width || m.Height < full.Height)
                             .OrderBy(m => SameAspect(m, full) ? 0 : 1).ThenByDescending(m => (long)m.Width * m.Height));
                 }
                 else names = app.games.Concat(app.excluded).Concat(app.profiles.Keys).Distinct().OrderBy(app.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
-                int count = choosing != null ? modes.Count : names.Count;
+                int count = choosing != null ? (brightening ? levels.Count : modes.Count) : names.Count;
                 int visible = Math.Max(1, Math.Min(5, count));   // five rows: the flyout stays clear of the screen's top at 150 %
                 int footH = choosing != null ? S(52) : S(8);
                 var c3 = new Rectangle(M, y, W - 2 * M, headH + visible * rowH + footH);
@@ -435,10 +444,10 @@ namespace HdrSwitch
                 if (picking || choosing != null)
                 {
                     var back = new Rectangle(c3.X + S(8), c3.Y + S(6), S(32), S(32));
-                    items.Add(new Item { Rect = back, Key = "back", Click = () => { if (stretching) stretching = false; else { picking = false; choosing = null; } ScrollHome(); Rebuild(); },
+                    items.Add(new Item { Rect = back, Key = "back", Click = () => { if (stretching) stretching = false; else if (brightening) brightening = false; else { picking = false; choosing = null; } ScrollHome(); Rebuild(); },
                         Paint = (g, rc, lk) => Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, Theme.Text1) });
                     string head = picking ? "Add a program" : app.DisplayName(choosing);
-                    string headRight = picking ? "" : stretching ? "inside " + chosen.Text : "at " + hz + " Hz";
+                    string headRight = picking ? "" : brightening ? "SDR brightness" : stretching ? "inside " + chosen.Text : "at " + hz + " Hz";
                     items.Add(new Item { Rect = c3, Paint = (g, rc, lk) =>
                     {
                         Draw(g, head, fonts.Strong, Theme.Text1, new Rectangle(rc.X + S(50), rc.Y, rc.Width - S(50) - CP - S(84), headH), TfLeft);
@@ -482,10 +491,47 @@ namespace HdrSwitch
                 for (int i = 0; i < count; i++)
                 {
                     var rr = new Rectangle(c3.X, listClip.Y + i * rowH, c3.Width, rowH);
+                    if (choosing != null && brightening)
+                    {
+                        int level = levels[i];
+                        string game = choosing;
+                        int mine;
+                        bool isMine = app.brightness.TryGetValue(game, out mine) ? mine == level : level < 0;
+                        string levelText = level < 0 ? "Windows setting" : level + "";
+                        string levelDetail = level < 0 ? "Not changed" : (80 + 4 * level) + " nits";
+                        items.Add(new Item { Rect = rr, Scrolls = true, Key = "bright:" + level, Click = () =>
+                        {
+                            brightening = false; ScrollHome();
+                            app.SetBrightness(game, level);
+                            Rebuild();
+                        }, Paint = (g, rc, lk) =>
+                        {
+                            RowBg(g, rc, lk);
+                            Draw(g, levelText, fonts.Body, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, S(150), rowH), TfLeft);
+                            Draw(g, levelDetail, fonts.Caption, Theme.Text3, new Rectangle(rc.X + CP + S(150), rc.Y, rc.Width - 2 * CP - S(150) - S(28), rowH), TfLeft | TextFormatFlags.Right);
+                            if (isMine) Draw(g, "\uE73E", fonts.GlyphSmall, Theme.Text1, new Rectangle(rc.Right - CP - S(20), rc.Y, S(20), rowH), TfCenter);
+                        } });
+                        continue;
+                    }
                     if (choosing != null)
                     {
                         var m = modes[i];
                         string game = choosing;
+                        if (ReferenceEquals(m, BrightRow))
+                        {
+                            // Opens the SDR brightness levels: how bright everything that isn't HDR looks while this game runs.
+                            int mine;
+                            string brightText = app.brightness.TryGetValue(game, out mine) ? mine + " (" + (80 + 4 * mine) + " nits)" : "Windows setting";
+                            bool set = app.brightness.ContainsKey(game);
+                            items.Add(new Item { Rect = rr, Scrolls = true, Key = "mode:bright", Click = () => { brightening = true; ScrollHome(); Rebuild(); }, Paint = (g, rc, lk) =>
+                            {
+                                RowBg(g, rc, lk);
+                                Draw(g, "SDR brightness", fonts.Body, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, S(130), rowH), TfLeft);
+                                Draw(g, brightText, fonts.Caption, set ? Theme.Text1 : Theme.Text3, new Rectangle(rc.X + CP + S(130), rc.Y, rc.Width - 2 * CP - S(130) - S(28), rowH), TfLeft | TextFormatFlags.Right);
+                                Draw(g, "\uE76C", fonts.GlyphSmall, Theme.Text3, new Rectangle(rc.Right - CP - S(20), rc.Y, S(20), rowH), TfCenter);
+                            } });
+                            continue;
+                        }
                         if (ReferenceEquals(m, StretchRow))
                         {
                             // Opens the list of resolutions the game itself can run at, stretched over this one.
@@ -565,14 +611,16 @@ namespace HdrSwitch
                             Draw(g, app.DisplayName(name), fonts.Body, Theme.Mix(Theme.Text2, Theme.Text1, lk.On), new Rectangle(rc.X + CP, rc.Y, right - capW - rc.X - CP, rowH), TfLeft);
                             Theme.Switch(g, new RectangleF(rc.Right - CP - S(44), rc.Y + (rowH - S(26)) / 2f, S(44), S(26)), lk.On, lk.Hover);
                         } });
-                        // The monitor symbol opens the game's resolution view; white when it has one.
-                        items.Add(new Item { Rect = mon, Scrolls = true, Key = "mon:" + name, Tip = "Resolution", Click = () => { choosing = name; stretching = false; ScrollHome(); Rebuild(); },
-                            Paint = (g, rc, lk) => Button(g, rc, lk, Theme.None, "", fonts.Glyph, prof != null ? Theme.Text1 : Theme.Mix(Theme.Text3, Theme.Text1, lk.Hover)) });
+                        // The monitor symbol opens the game's resolution and brightness view; white when it has either.
+                        items.Add(new Item { Rect = mon, Scrolls = true, Key = "mon:" + name, Tip = "Resolution and SDR brightness", Click = () => { choosing = name; stretching = false; brightening = false; ScrollHome(); Rebuild(); },
+                            Paint = (g, rc, lk) => Button(g, rc, lk, Theme.None, "", fonts.Glyph, prof != null || app.brightness.ContainsKey(name) ? Theme.Text1 : Theme.Mix(Theme.Text3, Theme.Text1, lk.Hover)) });
                     }
                 }
                 if (choosing != null)
                 {
-                    string note = stretching
+                    string note = brightening
+                        ? "How bright the desktop and SDR content look while this game runs with HDR on. Put back when it closes."
+                        : stretching
                         ? "For borderless games. Stretched over " + chosen.Text + "."
                         : "Missing one? Create it in NVIDIA Control Panel, at " + hz + " Hz.";
                     items.Add(new Item { Rect = new Rectangle(c3.X + CP, listClip.Bottom + S(4), c3.Width - 2 * CP, footH - S(12)), Paint = (g, rc, lk) =>
@@ -676,6 +724,7 @@ namespace HdrSwitch
             }
 
             static readonly Resolution.Mode StretchRow = new Resolution.Mode();   // stands for the "Game resolution" row among the modes
+            static readonly Resolution.Mode BrightRow = new Resolution.Mode();    // stands for the "SDR brightness" row
 
             /// <summary>"4:3", "16:10", "16:9" … or "1.78:1" for a shape without a short name.</summary>
             static string AspectText(Resolution.Mode m)
