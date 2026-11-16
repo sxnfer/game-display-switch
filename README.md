@@ -17,7 +17,7 @@ HDR, resolution and scaling switch when a game starts, and switch back when it c
 | **HDR** | On the moment you press Play, back to SDR 3 seconds after you quit. |
 | **Competitive resolution** | A smaller, centred play area per game, with an optional stretched resolution inside it. [More](docs/competitive-resolution.md) |
 | **NVIDIA scaling** | Switched to No scaling while the game runs, restored after. |
-| **Recording** | Stays in SDR while OBS or Streamlabs runs. [More](docs/recording.md) |
+| **Recording** | Stays in SDR while OBS, Streamlabs or another recording app runs. [More](docs/recording.md) |
 
 Finds your games on its own: Steam, Epic, GOG, Ubisoft Connect and game folders on every drive.
 

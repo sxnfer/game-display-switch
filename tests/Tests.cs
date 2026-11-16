@@ -226,6 +226,23 @@ namespace HdrSwitch.Tests
             Run.Equal("say \"hi\"", GameScanner.Json(item, "Quote"), "escaped quotes");
         }
 
+        public static void RecordersFromFile()
+        {
+            var r = TrayApp.ParseRecorders(new[] { "# a comment", "", "Medal.exe   # Medal", "C:\\Tools\\Capture.exe", "obs64.exe # OBS (mine)" });
+            Run.Equal("Medal", r["medal"], "a line with a name");
+            Run.Equal("", r["capture"], "a path without a name");
+            Run.Equal("OBS (mine)", r["obs64"], "a built-in one renamed");
+            Run.Equal("Streamlabs", r["streamlabs desktop"], "the built-in ones are always there");
+            Run.True(!r.ContainsKey("") && !r.ContainsKey("# a comment"), "comments and blank lines are skipped");
+        }
+
+        public static void NoBackgroundRecorders()
+        {
+            // These run all day: on the list they would keep HDR off all day.
+            foreach (string n in new[] { "nvidia share", "nvcontainer", "gamebar", "gamebarftserver", "discord", "medal" })
+                Run.True(!TrayApp.BuiltInRecorders.ContainsKey(n), n + " is not a built-in recorder");
+        }
+
         // ---- updates ----
 
         const string ReleaseJson = "{\"tag_name\":\"v1.7.0\",\"assets\":["

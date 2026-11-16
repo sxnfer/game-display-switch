@@ -79,6 +79,7 @@ namespace HdrSwitch
         static readonly string ListFile = Path.Combine(Dir, "games.txt");
         static readonly string ProfilesFile = Path.Combine(Dir, "resolutions.txt");
         static readonly string StateFile = Path.Combine(Dir, "resolution.state");   // the mode this app set – for crash recovery
+        static readonly string RecordersFile = Path.Combine(Dir, "recorders.txt");
 
         sealed class Running { public string Name; public RegisteredWaitHandle Wait; public WaitHandle Handle; }
         sealed class ActiveMode
@@ -132,13 +133,26 @@ namespace HdrSwitch
         const int StepMs = 700;   // each update step stays on the button at least this long
 
         // Recording apps (process name → name shown). An HDR game captured into an SDR recording comes out washed out,
-        // so with "SDR while recording" on, nothing switches HDR on while one of these runs.
-        static readonly Dictionary<string, string> Recorders = new Dictionary<string, string>
+        // so with "SDR while recording" on, nothing switches HDR on while one of these runs. Only apps that are opened to
+        // record or stream belong here: one that runs in the background all day (the NVIDIA overlay, Xbox Game Bar,
+        // Discord, Medal) would keep HDR off all day. Anything else can go in recorders.txt.
+        internal static readonly Dictionary<string, string> BuiltInRecorders = new Dictionary<string, string>
         {
-            { "obs64", "OBS Studio" }, { "obs32", "OBS Studio" }, { "streamlabs obs", "Streamlabs" }
+            { "obs64", "OBS Studio" }, { "obs32", "OBS Studio" },
+            { "streamlabs obs", "Streamlabs" }, { "streamlabs desktop", "Streamlabs" },
+            { "xsplit.core", "XSplit" }, { "prismlivestudio", "PRISM Live Studio" }, { "twitchstudio", "Twitch Studio" },
+            { "vmix64", "vMix" }, { "vmix", "vMix" }, { "bdcam", "Bandicam" }
         };
+        Dictionary<string, string> recorders = new Dictionary<string, string>(BuiltInRecorders);   // the built-in ones and recorders.txt
         bool sdrWhileRecording = ReadSetting("SdrWhileRecording");
         string recorder;   // the recording app that is running, while "SDR while recording" is on
+
+        /// <summary>"OBS Studio", or "medal.exe" for one from recorders.txt without a note.</summary>
+        string RecorderName(string name)
+        {
+            string l;
+            return recorders.TryGetValue(name, out l) && l.Length > 0 ? l : name + ".exe";
+        }
 
         public TrayApp(bool updated, bool open)   // --open: show the flyout right away (development, screenshots)
         {
@@ -147,6 +161,7 @@ namespace HdrSwitch
             bool firstRun = !File.Exists(ListFile);
             LoadList();
             LoadProfiles();
+            LoadRecorders();
             flyout = new Flyout(this);
             // Clicks pass through the island while a game runs or is about to start.
             island = new Island(() => flyout.Toggle(), () => running.Count > 0 || steamTimeout.Enabled, IslandScreen, Notify, Trim);
@@ -157,7 +172,7 @@ namespace HdrSwitch
             sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); Settle(); };
             scanTimer.Tick += (s, e) => { Rescan(); island.Poll(); };
             steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); Settle(); };
-            reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
+            reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); LoadRecorders(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
             modeCheck.Tick += (s, e) => { modeCheck.Stop(); OnDisplayChanged(false); };
 
             watcher = new FileSystemWatcher(Dir, "*.txt") { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size };
@@ -440,7 +455,7 @@ namespace HdrSwitch
             var alive = new HashSet<int>();
             var snapshot = Proc.Snapshot();
             // The recorder first, so a game found in the same scan already sees it.
-            SetRecorder(sdrWhileRecording ? snapshot.Select(p => p.Value).FirstOrDefault(Recorders.ContainsKey) : null);
+            SetRecorder(sdrWhileRecording ? snapshot.Select(p => p.Value).FirstOrDefault(recorders.ContainsKey) : null);
             foreach (var p in snapshot)
             {
                 alive.Add(p.Key);
@@ -490,8 +505,8 @@ namespace HdrSwitch
                     foreach (var d in owned) Hdr.Set(d, false);
                     owned.Clear();
                     if (ours) KeepMode();
-                    Announce(new Island.Act { Id = "rec", Text = Recorders[name] + " · SDR", Dot = Theme.Grey, Split = true, Bubble = Theme.Rec, Seconds = 4,
-                        Balloon = "HDR is off while " + Recorders[name] + " runs." });
+                    Announce(new Island.Act { Id = "rec", Text = RecorderName(name) + " · SDR", Dot = Theme.Grey, Split = true, Bubble = Theme.Rec, Seconds = 4,
+                        Balloon = "HDR is off while " + RecorderName(name) + " runs." });
                 }
             }
             else if (HdrRunning() && SwitchOn()) Announce(new Island.Act { Id = "game", Text = "HDR on", Dot = Theme.Amber });
@@ -947,6 +962,48 @@ namespace HdrSwitch
             ReapplyProfiles();
         }
 
+        // ---- recording apps ----
+
+        void LoadRecorders()
+        {
+            if (!File.Exists(RecordersFile))
+            {
+                var lines = new List<string>
+                {
+                    "# Display Switch - more recording apps for \"SDR while recording\". While one of these runs, HDR stays off.",
+                    "# One exe per line; text after # is the name shown. Already known: " + string.Join(", ", BuiltInRecorders.Values.Distinct()) + ".",
+                    "# Only add an app you open to record or stream: one that runs in the background all day keeps HDR off all day.",
+                    "# For example:  recorder.exe  # My recorder",
+                    ""
+                };
+                try { File.WriteAllLines(RecordersFile, lines, Encoding.UTF8); } catch (IOException) { }
+            }
+            string[] text;
+            try { text = File.ReadAllLines(RecordersFile); }
+            catch (IOException) { return; }   // file busy (being saved) – the watcher fires again
+            recorders = ParseRecorders(text);
+            if (sdrWhileRecording && recorder != null && !recorders.ContainsKey(recorder)) SetRecorder(null);   // taken off the list
+        }
+
+        /// <summary>The built-in recording apps and the lines of recorders.txt ("medal.exe  # Medal").</summary>
+        internal static Dictionary<string, string> ParseRecorders(IEnumerable<string> lines)
+        {
+            var all = new Dictionary<string, string>(BuiltInRecorders);
+            foreach (string raw in lines)
+            {
+                string line = raw, label = "";
+                int hash = line.IndexOf('#');
+                if (hash >= 0)
+                {
+                    label = line.Substring(hash + 1).Trim();
+                    line = line.Substring(0, hash);
+                }
+                string name = line.Trim().Length == 0 ? null : Proc.Normalize(line);
+                if (name != null) all[name] = label.Length > 0 ? label : all.ContainsKey(name) ? all[name] : "";
+            }
+            return all;
+        }
+
         // ---- game list ----
 
         void LoadList()
@@ -1085,7 +1142,7 @@ namespace HdrSwitch
             var displays = Hdr.All();
             var hdrGames = running.Values.Where(r => games.Contains(r.Name)).Select(r => DisplayName(r.Name)).Distinct().ToList();
             string hdr = !displays.Any(d => d.Supported) ? "No HDR display"
-                : recorder != null && !displays.Any(d => d.On) ? "SDR – " + Recorders[recorder] + " running"
+                : recorder != null && !displays.Any(d => d.On) ? "SDR – " + RecorderName(recorder) + " running"
                 : hdrGames.Count > 0 ? "HDR on – " + string.Join(", ", hdrGames)
                 : displays.Any(d => d.On) ? "HDR is on" : "Waiting for a game";
             if (res == null) return hdr;

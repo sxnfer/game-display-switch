@@ -617,7 +617,7 @@ namespace HdrSwitch
                 else if (app.recorder != null && !on)
                 {
                     title = "SDR";
-                    sub = TrayApp.Recorders[app.recorder] + " running" + (hdrGames.Count > 0 ? " · " + string.Join(", ", hdrGames) : "");
+                    sub = app.RecorderName(app.recorder) + " running" + (hdrGames.Count > 0 ? " · " + string.Join(", ", hdrGames) : "");
                 }
                 else if (hdrGames.Count > 0) { title = "HDR on"; sub = string.Join(", ", hdrGames); }
                 else if (res != null) { title = res.Mode.Text; sub = app.DisplayName(res.Game); }
