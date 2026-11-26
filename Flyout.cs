@@ -79,7 +79,7 @@ namespace HdrSwitch
             readonly List<Item> items = new List<Item>();
             readonly Dictionary<string, Anim> anims = new Dictionary<string, Anim>();
             readonly Dictionary<string, RollText> rolls = new Dictionary<string, RollText>();   // text that rolls when it changes, by key
-            readonly TextFormatFlags TfLeft, TfCenter, TfWrap;
+            readonly TextFormatFlags TfLeft, TfCenter, TfWrap, TfMeasure;
             Rectangle listClip;
             bool rounded;            // Windows draws the corners and the border (Windows 11); else a 1 px border is drawn here
             int scroll, scrollMax, rowH;
@@ -130,6 +130,9 @@ namespace HdrSwitch
                 TfLeft = Base | TextFormatFlags.Left;
                 TfCenter = Base | TextFormatFlags.HorizontalCenter;
                 TfWrap = TextFormatFlags.NoPadding | TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.Top;
+                // Measuring the full width of a line: no EndEllipsis. With it and no size to fit into, MeasureText gives
+                // the width of the text already shortened to one letter and "…", and everything sized from it truncates.
+                TfMeasure = TfLeft & ~TextFormatFlags.EndEllipsis;
 
                 tick = Tick;
                 thumbRest.Tick += (s, e) => { thumbRest.Stop(); thumb.To(0); Motion.Run(tick); };
@@ -847,7 +850,7 @@ namespace HdrSwitch
                     var tt = t;
                     string name = t.ToString();
                     bool sel = t == tab;
-                    int w = TextRenderer.MeasureText(name, fonts.Strong, Size.Empty, TfLeft).Width + S(20);   // sized for semibold: it doesn't move when chosen
+                    int w = TextRenderer.MeasureText(name, fonts.Strong, Size.Empty, TfMeasure).Width + S(20);   // sized for semibold: it doesn't move when chosen
                     var r = new Rectangle(x, S(6), w, S(36));
                     x += w + S(2);
                     items.Add(new Item { Rect = r, Key = TabKey(t), Name = name, Role = AccessibleRole.PageTab, Selected = sel, On = sel,
@@ -1089,7 +1092,7 @@ namespace HdrSwitch
                     Name = l.Title + ", " + (marker ? "on" : value == NoValue ? "nothing" : value), Tip = l.Desc, Paint = (g, rc, lk) =>
                 {
                     Color bg = P.CardSolid;
-                    int vw = marker ? MarkW() : TextRenderer.MeasureText(value, fonts.Caption, Size.Empty, TfLeft).Width + S(2);
+                    int vw = marker ? MarkW() : TextRenderer.MeasureText(value, fonts.Caption, Size.Empty, TfMeasure).Width + S(2);
                     int ix = rc.X + S(14), tx = ix + S(20) + S(12), tw = rc.Right - S(12) - vw - S(12) - tx;
                     double on = Math.Max(0, Math.Min(1, lk.On));
                     Color ic = Theme.Mix(P.Ink(P.Text3, bg), hdr && !P.HighContrast ? P.HdrDot : P.Accent, on);
@@ -1110,7 +1113,7 @@ namespace HdrSwitch
             {
                 bool light = P.Mode == Palette.Kind.Light;
                 Color fill = P.HighContrast ? P.Surface : light ? Color.FromArgb(0xFF, 0xF4, 0xCE) : Color.FromArgb(0x43, 0x35, 0x19);   // SystemFillColorCautionBackground
-                int resumeW = TextRenderer.MeasureText("Resume", fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                int resumeW = TextRenderer.MeasureText("Resume", fonts.Body, Size.Empty, TfMeasure).Width + S(24);
                 items.Add(new Item { Rect = r, Key = "paused", Role = AccessibleRole.StaticText, Name = "Paused · nothing switches", Tip = HotKey.Text + " resumes, from anywhere",
                     Paint = (g, rc, lk) =>
                 {
@@ -1168,7 +1171,7 @@ namespace HdrSwitch
                     () => { app.SetSdrWhileRecording(!app.sdrWhileRecording); Rebuild(); }, false);
                 bool keyOk = app.hotkey != null && app.hotkey.Registered || sample != null;
                 string keys = HotKey.Text.Replace("+", " + ");
-                int keysW = TextRenderer.MeasureText(keys, fonts.Caption, Size.Empty, TfLeft).Width + S(2);
+                int keysW = TextRenderer.MeasureText(keys, fonts.Caption, Size.Empty, TfMeasure).Width + S(2);
                 string keyDesc = keyOk ? "Stops all switching, from anywhere" : "Taken by another program";
                 items.Add(new Item { Rect = new Rectangle(M, y + 2 * rowCH, cw, rowCH), Key = "shortcut", Role = AccessibleRole.StaticText, Name = "Pause shortcut, " + HotKey.Text, Tip = keyDesc,
                     Paint = (g, rc, lk) =>
@@ -1188,7 +1191,7 @@ namespace HdrSwitch
                 // Updates: the version running, and the button when there is a newer one.
                 var ur = new Rectangle(M, y + 2 * rowCH, cw, rowCH);
                 string version = Updater.CurrentText;
-                int verW = TextRenderer.MeasureText(version, fonts.Caption, Size.Empty, TfLeft).Width + S(2);
+                int verW = TextRenderer.MeasureText(version, fonts.Caption, Size.Empty, TfMeasure).Width + S(2);
                 bool hasUpdate = app.update != null;
                 int btnW = hasUpdate ? UpdateWidth() : 0, btnNow = hasUpdate ? UpdateFit() : 0;
                 string upDesc = !hasUpdate ? "Signed releases, checked daily" : app.UpdateNote ?? "Version " + app.update.VersionText + " is ready";
@@ -1209,8 +1212,8 @@ namespace HdrSwitch
                 Scroller(from, new Rectangle(0, top, W, shown), content, rowCH);
                 y = top + shown + S(8);
                 Color fbg = Footer(W, y, barH);
-                int exitW = TextRenderer.MeasureText("Exit", fonts.Body, Size.Empty, TfLeft).Width + S(24);
-                int openW = TextRenderer.MeasureText("Open folder", fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                int exitW = TextRenderer.MeasureText("Exit", fonts.Body, Size.Empty, TfMeasure).Width + S(24);
+                int openW = TextRenderer.MeasureText("Open folder", fonts.Body, Size.Empty, TfMeasure).Width + S(24);
                 var exit = new Rectangle(W - M - exitW, y + (barH - S(32)) / 2, exitW, S(32));
                 var open = new Rectangle(exit.X - S(8) - openW, exit.Y, openW, S(32));
                 const string FilesAt = @"Files in %AppData%\HdrSwitch";
@@ -1231,9 +1234,9 @@ namespace HdrSwitch
             /// <summary>Wide enough for every step the button shows, so it never outgrows its place.</summary>
             int UpdateWidth()
             {
-                int spin = S(16), gap = S(8), w = TextRenderer.MeasureText("Update", fonts.Strong, Size.Empty, TfLeft).Width + S(24);
+                int spin = S(16), gap = S(8), w = TextRenderer.MeasureText("Update", fonts.Strong, Size.Empty, TfMeasure).Width + S(24);
                 foreach (string step in new[] { "Downloading", "Verifying", "Restarting", UpdateWaits, UpdateFailed, app.updateStep ?? "" })
-                    w = Math.Max(w, TextRenderer.MeasureText(step, fonts.Strong, Size.Empty, TfLeft).Width + S(12) + spin + gap + S(18));
+                    w = Math.Max(w, TextRenderer.MeasureText(step, fonts.Strong, Size.Empty, TfMeasure).Width + S(12) + spin + gap + S(18));
                 return w;
             }
 
@@ -1242,7 +1245,7 @@ namespace HdrSwitch
             {
                 bool busy = app.updating, failed = app.updateStep == UpdateFailed, waits = app.updateStep == UpdateWaits;
                 string label = busy ? app.updateStep ?? "Downloading" : "Update";
-                int text = TextRenderer.MeasureText(label, fonts.Strong, Size.Empty, TfLeft).Width;
+                int text = TextRenderer.MeasureText(label, fonts.Strong, Size.Empty, TfMeasure).Width;
                 return (!busy ? S(24) : failed || waits ? S(18) : S(12) + S(16) + S(8)) + text + (busy ? S(18) : 0);
             }
 
@@ -1388,7 +1391,7 @@ namespace HdrSwitch
             void CardToggle(Rectangle r, string key, string icon, string label, string desc, bool on, bool first, bool last, Action click, bool recording, string offWord = "Off", bool hdr = false)
             {
                 RollText state = Roll("tile:" + key, on ? "On" : offWord, fonts.Body);
-                int stateW = Math.Max(TextRenderer.MeasureText(offWord, fonts.Body, Size.Empty, TfLeft).Width, TextRenderer.MeasureText("On", fonts.Body, Size.Empty, TfLeft).Width) + S(2);
+                int stateW = Math.Max(TextRenderer.MeasureText(offWord, fonts.Body, Size.Empty, TfMeasure).Width, TextRenderer.MeasureText("On", fonts.Body, Size.Empty, TfMeasure).Width) + S(2);
                 items.Add(new Item { Rect = r, Key = "tile:" + key, On = on, Name = label, Tip = null, Role = AccessibleRole.CheckButton, Selected = on, Click = click, RingInside = true,
                     Paint = (g, rc, lk) =>
                 {
@@ -1587,7 +1590,7 @@ namespace HdrSwitch
             }
 
             /// <summary>The marker's width: dot, gap, the word and the padding either side.</summary>
-            int MarkW() { return TextRenderer.MeasureText(MarkOn, fonts.Label, Size.Empty, TfLeft).Width + S(6) + S(6) + S(5) + S(6) + S(2); }
+            int MarkW() { return TextRenderer.MeasureText(MarkOn, fonts.Label, Size.Empty, TfMeasure).Width + S(6) + S(6) + S(5) + S(6) + S(2); }
 
             /// <summary>One item of a segmented control: the chosen one raised (ControlFill, an outline, semibold).</summary>
             void Segment(Graphics g, Rectangle rc, Look lk, string text)
