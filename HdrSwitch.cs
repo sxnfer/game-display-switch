@@ -53,6 +53,11 @@ namespace HdrSwitch
             };
             // --updated: started by the old version during an update – wait for it to exit instead of giving up.
             bool updated = args.Contains("--updated");
+            if (args.Contains("--render-flyout"))   // draws the flyout over made-up state into a PNG (Flyout.cs): checks its look, even without Windows
+            {
+                Environment.ExitCode = TrayApp.RenderFlyout(args);
+                return;
+            }
             if (args.Contains("--island-demo"))   // a preview of the island alone: before the mutex, so it runs beside an installed copy
             {
                 Application.EnableVisualStyles();

@@ -1,6 +1,6 @@
-// One look for the island, the flyout and the tray icon: colours, fonts, corner shapes and the shared controls.
-// Liquid glass (Glass.cs) with white on it at a few strengths, and one colour with a meaning: amber is HDR (red only
-// marks a recording app). The Windows accent colour is not used, so amber never has to compete with it.
+// What the island, the flyout and the tray icon share: fonts, corner shapes, colour arithmetic, the spinner, and the
+// island's colours. The island is liquid glass (Glass.cs) with white on it at a few strengths. The flyout is a solid
+// Windows 11 flyout with its own colours (Palette.cs). Amber means HDR everywhere (red only marks a recording app).
 
 using System;
 using System.Collections.Generic;
@@ -13,27 +13,13 @@ namespace HdrSwitch
 {
     static class Theme
     {
-        // Everything sits on glass (Glass.cs), so the surfaces are white at a few small strengths: they take their
-        // colour from what is behind. Text is white at three strengths; dark text (Ink) only on white glass.
+        // The island sits on glass (Glass.cs): its text is white at two strengths and takes nothing from Windows' mode.
         public static readonly Color Veil = Color.FromArgb(72, 18, 18, 24);      // the glass itself: just enough for white text on a bright desktop
         public static readonly Color Solid = Color.FromArgb(255, 30, 30, 34);    // the glass with "Transparency effects" off
-        public static readonly Color None = Color.FromArgb(0, 255, 255, 255);    // no fill; mixes towards white
-        public static readonly Color Chip = Color.FromArgb(18, 255, 255, 255);   // a card, an unlit tile
-        public static readonly Color ChipHover = Color.FromArgb(33, 255, 255, 255);
-        public static readonly Color Raised = Color.FromArgb(31, 255, 255, 255); // buttons
-        public static readonly Color Hover = Color.FromArgb(51, 255, 255, 255);
-        public static readonly Color Press = Color.FromArgb(20, 255, 255, 255);
-        public static readonly Color Lit = Color.FromArgb(230, 255, 255, 255);   // white glass: a lit tile, the update button
-        public static readonly Color LitHover = Color.FromArgb(242, 255, 255, 255);
-        public static readonly Color LitPress = Color.FromArgb(205, 255, 255, 255);
-        public static readonly Color Ink = Color.FromArgb(18, 18, 20);           // text on white glass
-        public static readonly Color InkSoft = Color.FromArgb(160, 18, 18, 20);
         public static readonly Color Text1 = Color.White;
         public static readonly Color Text2 = Color.FromArgb(196, 255, 255, 255);
-        public static readonly Color Text3 = Color.FromArgb(160, 255, 255, 255);
-        public static readonly Color Amber = Color.FromArgb(255, 170, 0);    // HDR on
+        public static readonly Color Amber = Color.FromArgb(255, 170, 0);    // HDR on: the island's dot and the tray icon
         public static readonly Color Grey = Color.FromArgb(142, 142, 147);   // SDR
-        public static readonly Color TrackOff = Color.FromArgb(41, 255, 255, 255);
         public static readonly Color Rec = Color.FromArgb(255, 69, 58);      // a recording app
 
         public static readonly bool Win11 = Environment.OSVersion.Version.Build >= 22000;
@@ -157,30 +143,6 @@ namespace HdrSwitch
             using (var b = new SolidBrush(c)) g.FillEllipse(b, cx - d / 2, cy - d / 2, d, d);
         }
 
-        /// <summary>
-        /// A switch: a pill-shaped track and a white pill for a thumb. on runs 0 → 1 as the thumb slides and the track
-        /// crossfades to amber, with a faint amber glow round it; lift (hover, press) brightens it a little.
-        /// </summary>
-        public static void Switch(Graphics g, RectangleF r, double on, double lift)
-        {
-            double t = Math.Max(0, Math.Min(1, on));
-            if (t > 0.01) Fill(g, RectangleF.Inflate(r, 2, 2), r.Height / 2 + 2, Fade(Amber, 0.2 * t));
-            Fill(g, r, r.Height / 2, Mix(Mix(TrackOff, Amber, on), Color.White, lift * 0.12));
-            float pad = r.Height * 3 / 26f, th = r.Height - 2 * pad, tw = th * 1.4f;
-            float x = r.X + pad + (float)((r.Width - 2 * pad - tw) * Math.Max(-0.05, Math.Min(1.05, on)));
-            var thumb = new RectangleF(x, r.Y + pad, tw, th);
-            Fill(g, new RectangleF(x, thumb.Y + r.Height * 1.5f / 26f, tw, th), th / 2, Color.FromArgb(70, 0, 0, 0));   // a soft shadow under the thumb
-            Fill(g, thumb, th / 2, Color.White);
-        }
-
-        /// <summary>The app's mark: an H on a soft square, amber for HDR and grey for SDR (on: 0 → 1).</summary>
-        public static void Badge(Graphics g, RectangleF r, double on)
-        {
-            Fill(g, r, r.Width * 0.3f, Mix(Grey, Amber, on));
-            using (var b = new SolidBrush(Mix(Color.White, Color.Black, on)))
-            using (var p = H(r)) g.FillPath(b, p);
-        }
-
         static readonly System.Diagnostics.Stopwatch spinClock = System.Diagnostics.Stopwatch.StartNew();
 
         /// <summary>
@@ -198,17 +160,6 @@ namespace HdrSwitch
                 g.DrawEllipse(track, r);
                 g.DrawArc(arc, r, (float)(turn * 360 - 90), 90);
             }
-        }
-
-        /// <summary>The H as three bars, on the 16-unit grid the tray icon uses.</summary>
-        static GraphicsPath H(RectangleF r)
-        {
-            float u = r.Width / 16f;
-            var p = new GraphicsPath(FillMode.Winding);
-            p.AddRectangle(new RectangleF(r.X + 4 * u, r.Y + 3.5f * u, 2.2f * u, 9 * u));
-            p.AddRectangle(new RectangleF(r.X + 9.8f * u, r.Y + 3.5f * u, 2.2f * u, 9 * u));
-            p.AddRectangle(new RectangleF(r.X + 4 * u, r.Y + 6.9f * u, 8 * u, 2.2f * u));
-            return p;
         }
     }
 }

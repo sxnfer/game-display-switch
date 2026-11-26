@@ -43,17 +43,17 @@ namespace HdrSwitch.Tests
 
         /// <summary>
         /// Everything in the flyout but its list rows, built from the same parts as Rebuild: margin, status card (with the
-        /// update button and a notice of noticeH logical pixels), tiles, the switch-back bar, the list's header and foot,
-        /// the bottom bar and margin.
+        /// update button and a notice of noticeH logical pixels), the group of three toggle rows, the switch-back row,
+        /// the list's header and foot, and the footer bar.
         /// </summary>
         static int FlyoutFixed(double k, bool choosing, bool update, int noticeH)
         {
-            int M = Px(16, k), G = Px(12, k), CP = Px(16, k);
-            int notice = noticeH > 0 ? Px(10, k) + Px(noticeH, k) : 0;
-            int updateY = CP + Px(44, k) + notice + Px(14, k);
-            int h1 = (update ? updateY + Px(36, k) : updateY - Px(14, k)) + CP;
-            int y = M + h1 + G + Px(76, k) + G + Px(52, k) + G;
-            return y + Px(44, k) + (choosing ? Px(52, k) : Px(8, k)) + G + Px(32, k) + M;
+            int M = Px(12, k), G = Px(8, k), CP = Px(12, k), row = Px(52, k);
+            int notice = noticeH > 0 ? Px(8, k) + Px(noticeH, k) : 0;
+            int updateY = CP + Px(28, k) + Px(16, k) + notice + Px(12, k);
+            int h1 = (update ? updateY + Px(32, k) : updateY - Px(12, k)) + CP;
+            int y = M + h1 + G + 3 * row + G + row + G;
+            return y + Px(40, k) + (choosing ? Px(52, k) : Px(4, k)) + G + Px(48, k);
         }
 
         /// <summary>The rows shown on a monitor of this height at scale k, taskbar 48 px (at 100 %) tall.</summary>
@@ -70,16 +70,16 @@ namespace HdrSwitch.Tests
         {
             // A game's resolution view (the tallest list), 20 resolutions.
             Run.Equal(5, FlyoutRowsOn(1080, 1.00, true, false, 0, 20), "1080p at 100 %: five rows");
-            Run.Equal(5, FlyoutRowsOn(1080, 1.50, true, false, 0, 20), "1080p at 150 %: five rows");
-            Run.Equal(3, FlyoutRowsOn(1080, 1.75, true, false, 0, 20), "1080p at 175 %: three rows (five ran off the top)");
+            Run.Equal(4, FlyoutRowsOn(1080, 1.50, true, false, 0, 20), "1080p at 150 %: four rows");
+            Run.Equal(1, FlyoutRowsOn(1080, 1.75, true, false, 0, 20), "1080p at 175 %: one row (five ran off the top), the list scrolls");
             Run.Equal(1, FlyoutRowsOn(1080, 2.00, true, false, 0, 20), "1080p at 200 %: one row, the list scrolls");
-            Run.Equal(3, FlyoutRowsOn(1080, 1.50, true, true, 34, 20), "1080p at 150 % with an update button and a notice: three rows");
+            Run.Equal(2, FlyoutRowsOn(1080, 1.50, true, true, 34, 20), "1080p at 150 % with an update button and a notice: two rows");
             Run.Equal(5, FlyoutRowsOn(1440, 1.75, true, false, 0, 20), "1440p at 175 %: five rows");
-            Run.Equal(5, FlyoutRowsOn(1440, 2.00, true, false, 0, 20), "1440p at 200 %: five rows");
-            Run.Equal(3, FlyoutRowsOn(1440, 2.00, true, true, 34, 20), "1440p at 200 % with an update button and a notice: three rows");
+            Run.Equal(4, FlyoutRowsOn(1440, 2.00, true, false, 0, 20), "1440p at 200 %: four rows");
+            Run.Equal(2, FlyoutRowsOn(1440, 2.00, true, true, 34, 20), "1440p at 200 % with an update button and a notice: two rows");
             // The games list: a shorter foot.
-            Run.Equal(4, FlyoutRowsOn(1080, 1.75, false, false, 0, 20), "games at 1080p 175 %: four rows");
-            Run.Equal(2, FlyoutRowsOn(1080, 2.00, false, false, 0, 20), "games at 1080p 200 %: two rows");
+            Run.Equal(3, FlyoutRowsOn(1080, 1.75, false, false, 0, 20), "games at 1080p 175 %: three rows");
+            Run.Equal(1, FlyoutRowsOn(1080, 2.00, false, false, 0, 20), "games at 1080p 200 %: one row");
             // Never more than the list has, never fewer than one.
             Run.Equal(2, FlyoutRowsOn(1080, 1.00, false, false, 0, 2), "two games: two rows");
             Run.Equal(1, FlyoutRowsOn(1080, 1.00, false, false, 0, 0), "no games: one row for the message");
