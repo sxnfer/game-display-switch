@@ -59,5 +59,5 @@ Display Switch checks this repository once a day. When there is a new version, a
 
 ## Uninstall
 
-Turn off **Start with Windows**, choose **Exit**, then delete the folder with `HdrSwitch.exe` and `%AppData%\HdrSwitch`.
+Turn off **Start with Windows**, choose **Exit**, then delete the folder with `HdrSwitch.exe` and `%AppData%\HdrSwitch`. That folder holds your lists (`games.txt`, `resolutions.txt`, `brightness.txt`, `recorders.txt`), the app's crash-recovery notes (`*.state`) and `error.log`, if anything ever went wrong.
 

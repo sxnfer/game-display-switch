@@ -267,7 +267,7 @@ namespace HdrSwitch
                     case Keys.Enter: Press(); return true;
                     case Keys.Back:
                         int back = items.FindIndex(it => it.Key == "back");
-                        if (back >= 0) items[back].Click();
+                        if (back >= 0) Do(items[back].Click);
                         return true;
                 }
                 return base.ProcessDialogKey(keyData);
@@ -309,7 +309,22 @@ namespace HdrSwitch
             {
                 if (!Focusable(focus)) return;
                 keyboard = true;
-                items[focus].Click();
+                Do(items[focus].Click);
+            }
+
+            /// <summary>
+            /// Runs a click. One that fails is written to error.log and the view is rebuilt from the app's real state, so a
+            /// switch never shows a change that didn't happen – and the flyout stays usable.
+            /// </summary>
+            void Do(Action click)
+            {
+                try { click(); }
+                catch (Exception e)
+                {
+                    Guard.Log("Flyout click", e);
+                    try { if (Visible && !closing) Rebuild(); }
+                    catch (Exception again) { Guard.Log("Flyout rebuild after a failed click", again); }
+                }
             }
 
             /// <summary>Scrolls the list so a row the keyboard moved to is in view.</summary>
@@ -423,7 +438,8 @@ namespace HdrSwitch
 
                 public override void DoDefaultAction()
                 {
-                    if (Live && item.Click != null) f.BeginInvoke(item.Click);   // not inside the screen reader's call
+                    var click = item.Click;
+                    if (Live && click != null) f.BeginInvoke((Action)(() => f.Do(click)));   // not inside the screen reader's call
                 }
 
                 public override void Select(AccessibleSelection flags)
@@ -957,10 +973,17 @@ namespace HdrSwitch
                 BeginInvoke((Action)Render);
             }
 
-            /// <summary>Paints the whole window onto its surface and hands it to Windows, with the blur and the shape.</summary>
+            /// <summary>Paints the whole window onto its surface and hands it to Windows. A paint that fails is logged, not fatal.</summary>
             void Render()
             {
                 queued = false;
+                try { PaintSurface(); }
+                catch (Exception e) { Guard.Log("Painting the flyout", e); }
+            }
+
+            /// <summary>The painting itself, with the blur and the shape.</summary>
+            void PaintSurface()
+            {
                 if (fonts == null || !IsHandleCreated || ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
                 var all = new RectangleF(0, 0, ClientSize.Width, ClientSize.Height);
                 if (surface == null || surface.Size != ClientSize)
@@ -1185,7 +1208,7 @@ namespace HdrSwitch
                 var click = pressed >= 0 && hit == pressed ? items[pressed].Click : null;
                 pressed = -1;
                 Aim();
-                if (click != null) click();
+                if (click != null) Do(click);
             }
 
             protected override void OnMouseWheel(MouseEventArgs e)
