@@ -1,9 +1,12 @@
 // The flyout's decisions about what it says, kept apart from the window so the checks can run them: the three tabs and
 // which one it opens on, and the Live tab – the status line and the stack of five layers (HDR, SDR brightness,
-// competitive area, stretch, NVIDIA scaling) worked out from a snapshot of the app's state.
+// competitive area, stretch, NVIDIA scaling) worked out from a snapshot of the app's state; and the Games tab – the
+// line under each game in the library, the search, and a game's page: its five layer cards, the to-scale picture of
+// its competitive area, the SDR brightness slider and the setup hint.
 
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 
 namespace HdrSwitch
 {
@@ -162,12 +165,228 @@ namespace HdrSwitch
 
         /// <summary>
         /// The Games tab's height without its list rows, in pixels at scale k: the tab bar (or a view's back header),
-        /// the gap above the list, below it a view's note (subView) or a small gap, and the footer bar.
+        /// the gap above the list, the search box above the library's list (search), below it a view's note (subView)
+        /// or a small gap, and the footer bar.
         /// </summary>
-        internal static int GamesFixed(float k, bool subView)
+        internal static int GamesFixed(float k, bool subView, bool search)
         {
             Func<double, int> S = v => (int)Math.Round(v * k);
-            return S(48) + S(4) + (subView ? S(52) : S(4)) + S(8) + S(48);
+            return S(48) + S(4) + (search ? S(40) : 0) + (subView ? S(52) : S(4)) + S(8) + S(48);
+        }
+
+        // ---- Games: the library and a game's page ----
+
+        /// <summary>One game as the Games tab shows it: what it is and what it changes.</summary>
+        internal sealed class GameInfo
+        {
+            public string Exe;                 // the list's key: "cs2" (shown as cs2.exe)
+            public string Name;                // as shown: "Counter-Strike 2"
+            public string Launcher;            // "Steam", "Riot", "Added by hand", or null
+            public bool Hdr;                   // HDR on while it runs (games.txt); off: never
+            public bool Running;
+            public int Brightness = -1;        // its SDR brightness, 0…100, or -1: Windows' own
+            public Resolution.Mode Area;       // its competitive area, or null
+            public Resolution.Mode Stretch;    // its own resolution stretched over the area (one that fits), or null
+            public bool Nvidia = true;         // an NVIDIA driver runs the display (NVIDIA scaling can be set)
+            public string AreaDetail;          // "92.5 % · 24.5″": how much of the panel the area covers
+        }
+
+        /// <summary>
+        /// The line under a game in the library, what it changes: "HDR · SDR 40 · 2368 × 1332", "HDR · 2368 × 1332 ·
+        /// stretched 4:3", "Stays in SDR", "HDR". The SDR brightness only counts with HDR on, so a game that stays in
+        /// SDR doesn't list it.
+        /// </summary>
+        internal static string GameRecipe(GameInfo g)
+        {
+            var parts = new List<string> { g.Hdr ? "HDR" : "Stays in SDR" };
+            if (g.Hdr && g.Brightness >= 0) parts.Add("SDR " + g.Brightness);
+            if (g.Area != null) parts.Add(g.Area.Text);
+            if (g.Area != null && g.Stretch != null) parts.Add("stretched " + AspectText(g.Stretch));
+            return string.Join(" · ", parts.ToArray());
+        }
+
+        /// <summary>
+        /// The search: every word typed is in the game's name or its exe name, ignoring case ("counter 2", "cs2.exe").
+        /// Nothing typed: every game.
+        /// </summary>
+        internal static bool GameMatches(string query, string name, string exe)
+        {
+            if (query == null) return true;
+            foreach (string w in query.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+                if ((name ?? "").IndexOf(w, StringComparison.OrdinalIgnoreCase) < 0 && ((exe ?? "") + ".exe").IndexOf(w, StringComparison.OrdinalIgnoreCase) < 0)
+                    return false;
+            return true;
+        }
+
+        /// <summary>"Steam" from "Steam: Counter-Strike 2", "Added by hand", or null: the label names no launcher.</summary>
+        internal static string LabelLauncher(string label)
+        {
+            if (string.IsNullOrEmpty(label)) return null;
+            if (label == "added by hand") return "Added by hand";
+            int colon = label.IndexOf(": ");
+            return colon > 0 && colon < 10 ? label.Substring(0, colon) : null;
+        }
+
+        /// <summary>The library's footer: "32 with HDR · 38 games"; while searching, "3 of 38 games".</summary>
+        internal static string GamesSummary(int withHdr, int total, int shown, bool searching)
+        {
+            string games = total == 1 ? " game" : " games";
+            return searching ? shown + " of " + total + games : withHdr + " with HDR · " + total + games;
+        }
+
+        /// <summary>One card of a game's page: a layer, in Live's order.</summary>
+        internal sealed class GameCard
+        {
+            public string Key;       // hdr, bright, area, stretch, scaling
+            public string Title, Desc, Value;
+            public bool On;          // set for this game: a lit icon (HDR: amber)
+            public bool Enabled;     // it can be changed now (stretch needs an area; scaling is only information)
+        }
+
+        /// <summary>
+        /// A game's page, top to bottom in the order the layers apply (Live's): HDR (on or never), SDR brightness (its
+        /// own level or Windows'), competitive area, stretch (only over an area) and NVIDIA scaling, which the app sets
+        /// by itself and the page only explains.
+        /// </summary>
+        internal static List<GameCard> GameCards(GameInfo g)
+        {
+            var list = new List<GameCard>();
+            list.Add(new GameCard { Key = "hdr", Title = "HDR", On = g.Hdr, Enabled = true, Value = g.Hdr ? "On" : "Never",
+                Desc = g.Hdr ? "On while it runs" : "Stays in SDR, never switched" });
+            bool own = g.Brightness >= 0;
+            list.Add(new GameCard { Key = "bright", Title = "SDR brightness", On = own, Enabled = true, Value = BrightnessText(g.Brightness),
+                Desc = BrightnessDesc(g.Brightness, g.Hdr) });
+            bool area = g.Area != null;
+            list.Add(new GameCard { Key = "area", Title = "Competitive area", On = area, Enabled = true, Value = area ? g.Area.Text : "Off",
+                Desc = area ? "Centred" + (string.IsNullOrEmpty(g.AreaDetail) ? "" : ", " + g.AreaDetail) : "A smaller, centred picture" });
+            bool stretch = area && g.Stretch != null;
+            list.Add(new GameCard { Key = "stretch", Title = "Stretch", On = stretch, Enabled = area,
+                Value = stretch ? g.Stretch.Text + " · " + AspectText(g.Stretch) : "Off",
+                Desc = !area ? "Needs a competitive area" : stretch ? "Borderless games only" : "A lower resolution over the area" });
+            bool scaling = g.Nvidia && area && !stretch;
+            list.Add(new GameCard { Key = "scaling", Title = "NVIDIA scaling", On = scaling, Enabled = false,
+                Value = !g.Nvidia ? "Not available" : scaling ? "No scaling" : "Not needed",
+                Desc = !g.Nvidia ? "No NVIDIA graphics on this display" : scaling ? "Set to No scaling while it runs" : area ? "Not needed: the stretch fills the area" : "Not needed without an area" });
+            return list;
+        }
+
+        /// <summary>What the SDR brightness card says under its title, for a level (-1: Windows' own) and whether the game has HDR.</summary>
+        internal static string BrightnessDesc(int level, bool hdr)
+        {
+            return level < 0 ? "Windows' own until you change it" : hdr ? "Desktop and SDR menus, while it runs" : "Only if HDR is on while it runs";
+        }
+
+        /// <summary>The SDR brightness card's value: "Windows'" for Windows' own level (-1), else the level.</summary>
+        internal static string BrightnessText(int level) { return level < 0 ? "Windows'" : level.ToString(); }
+
+        /// <summary>How bright SDR white is at a slider level, as Windows' own slider maps it: 80 nits at 0, 480 at 100.</summary>
+        internal static int BrightnessNits(int level) { return 80 + 4 * Math.Max(0, Math.Min(100, level)); }
+
+        /// <summary>Windows' level, where it can't be read: the middle of the slider.</summary>
+        internal const int UnknownWindowsLevel = 50;
+
+        /// <summary>
+        /// Where the slider's thumb sits, 0 → 1: at the game's own level, or – for Windows' own (-1) – at the level
+        /// Windows has now (windowsNow, -1 when it can't be read: the middle).
+        /// </summary>
+        internal static double SliderFraction(int level, int windowsNow)
+        {
+            int at = level >= 0 ? level : windowsNow >= 0 ? windowsNow : UnknownWindowsLevel;
+            return Math.Max(0, Math.Min(100, at)) / 100.0;
+        }
+
+        /// <summary>The level at a point of the slider's track (x from its left end, w its length): 0…100, rounded.</summary>
+        internal static int SliderLevel(double x, double w)
+        {
+            if (w <= 0) return 0;
+            return (int)Math.Round(Math.Max(0, Math.Min(1, x / w)) * 100);
+        }
+
+        /// <summary>
+        /// The level after a key on the slider: delta 1 or -1 (arrows), 10 (Page Up / Down), 100 (Home / End). From
+        /// Windows' own it starts where the thumb shows it, at Windows' level now. Never below 0: Windows' own is the
+        /// check box under the slider.
+        /// </summary>
+        internal static int StepBrightness(int level, int windowsNow, int delta)
+        {
+            int from = level >= 0 ? level : windowsNow >= 0 ? windowsNow : UnknownWindowsLevel;
+            return Math.Max(0, Math.Min(100, from + delta));
+        }
+
+        /// <summary>A competitive area drawn to scale: where it and the stretched resolution sit on the screen, as fractions of it.</summary>
+        internal struct AreaPicture
+        {
+            public RectangleF Area;      // the area, 1:1 in the middle of the screen
+            public RectangleF Stretch;   // the game's own resolution at its own size (1:1), in the middle; empty when not stretched
+        }
+
+        /// <summary>
+        /// The page's picture of the screen: the area shown 1:1 in the middle (2368 × 1332 on 2560 × 1440: 92.5 % each
+        /// way), and inside it the game's own resolution at its own size, which the GPU stretches over the area.
+        /// </summary>
+        internal static AreaPicture AreaPreview(Resolution.Mode full, Resolution.Mode area, Resolution.Mode stretch)
+        {
+            var p = new AreaPicture();
+            if (full == null || full.Width <= 0 || full.Height <= 0 || area == null) return p;
+            Func<Resolution.Mode, RectangleF> centred = m =>
+            {
+                float w = Math.Min(1f, (float)m.Width / full.Width), h = Math.Min(1f, (float)m.Height / full.Height);
+                return new RectangleF((1 - w) / 2, (1 - h) / 2, w, h);
+            };
+            p.Area = centred(area);
+            if (stretch != null) p.Stretch = centred(stretch);
+            return p;
+        }
+
+        /// <summary>The picture's label: "2368 × 1332 · 24.5″" (the area's diagonal), or "· 92.5 %" when the panel's size is unknown.</summary>
+        internal static string AreaLabel(Resolution.Mode area, Resolution.Mode full, double inches)
+        {
+            if (area == null) return "";
+            if (full == null || full.Width == 0) return area.Text;
+            double ratio = Diagonal(area) / Diagonal(full);
+            return area.Text + " · " + (inches > 0 ? (inches * ratio).ToString("0.0") + "″" : (ratio * 100).ToString("0.0") + " %");
+        }
+
+        static double Diagonal(Resolution.Mode m) { return Math.Sqrt((double)m.Width * m.Width + (double)m.Height * m.Height); }
+
+        /// <summary>
+        /// The setup hint a game's page shows: the latest notification when it is about this game (name), else what has
+        /// to be created first – the area or the stretched resolution, when the display doesn't offer it at the rate
+        /// (hz) it is switched at. Null: nothing to set up.
+        /// </summary>
+        internal static string SetupHint(GameInfo g, string notice, bool areaExists, bool stretchExists, int hz)
+        {
+            if (notice != null && g.Name != null && notice.IndexOf(g.Name, StringComparison.Ordinal) >= 0) return notice;
+            Resolution.Mode missing = g.Area != null && !areaExists ? g.Area : g.Area != null && g.Stretch != null && !stretchExists ? g.Stretch : null;
+            if (missing == null) return null;
+            return g.Nvidia
+                ? "Create " + missing.Text + " at " + hz + " Hz in NVIDIA Control Panel (Change resolution › Customize) before it can switch."
+                : "The display has no " + missing.Text + " at " + hz + " Hz. Create it as a custom resolution in the graphics driver first.";
+        }
+
+        /// <summary>"92.5 % · 24.6″": how much of the panel a mode covers when shown 1:1 in the middle.</summary>
+        internal static string SizeText(Resolution.Mode m, Resolution.Mode full, double inches)
+        {
+            if (full == null || full.Width == 0) return "";
+            double ratio = Diagonal(m) / Diagonal(full);
+            string s = (ratio * 100).ToString("0.0") + " %";
+            return inches > 0 ? s + " · " + (inches * ratio).ToString("0.0") + "″" : s;
+        }
+
+        /// <summary>"4:3", "16:10", "16:9" … or "1.78:1" for a shape without a short name.</summary>
+        internal static string AspectText(Resolution.Mode m)
+        {
+            int a = m.Width, b = m.Height;
+            while (b != 0) { int t = a % b; a = b; b = t; }
+            if (a == 0) return "";
+            int w = m.Width / a, h = m.Height / a;
+            if (w == 8 && h == 5) return "16:10";
+            return w <= 21 && h <= 10 ? w + ":" + h : ((double)m.Width / m.Height).ToString("0.00") + ":1";
+        }
+
+        internal static bool SameAspect(Resolution.Mode m, Resolution.Mode full)
+        {
+            return Math.Abs((long)m.Width * full.Height - (long)m.Height * full.Width) * 100 < (long)full.Width * full.Height;
         }
     }
 }

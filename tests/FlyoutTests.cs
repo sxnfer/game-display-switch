@@ -45,7 +45,7 @@ namespace HdrSwitch.Tests
         static int FlyoutRowsOn(int screenH, double k, bool choosing, int count)
         {
             int workArea = screenH - Px(48, k);
-            int fixedH = TrayApp.GamesFixed((float)k, choosing);
+            int fixedH = TrayApp.GamesFixed((float)k, choosing, !choosing);
             int rows = TrayApp.FlyoutRows(workArea, Px(12, k), fixedH, Px(44, k), count);
             if (rows > 1) Run.True(fixedH + rows * Px(44, k) <= workArea - 2 * Px(12, k), "fits above the taskbar at " + k * 100 + " % on " + screenH + "p");
             return rows;
@@ -53,11 +53,13 @@ namespace HdrSwitch.Tests
 
         public static void FlyoutRowsFitTheWorkingArea()
         {
-            // The parts around the list, as Rebuild lays them out: tab bar 48, 4 above the list, a view's note 52 (else
-            // 4), 8, the footer bar 48. The status card and the settings rows live in their own tabs now.
-            Run.Equal(112, TrayApp.GamesFixed(1, false), "the games list's frame at 100 %");
-            Run.Equal(160, TrayApp.GamesFixed(1, true), "a game's resolution view's frame at 100 %");
-            Run.Equal(320, TrayApp.GamesFixed(2, true), "… at 200 %");
+            // The parts around the list, as Rebuild lays them out: tab bar 48, 4 above the list, the library's search box
+            // and the gap under it 40, a view's note 52 (else 4), 8, the footer bar 48. The status card and the
+            // settings rows live in their own tabs now.
+            Run.Equal(152, TrayApp.GamesFixed(1, false, true), "the library's frame at 100 % (U3: with the search box)");
+            Run.Equal(112, TrayApp.GamesFixed(1, false, false), "the programs to add, at 100 %");
+            Run.Equal(160, TrayApp.GamesFixed(1, true, false), "a game's resolution list's frame at 100 %");
+            Run.Equal(320, TrayApp.GamesFixed(2, true, false), "… at 200 %");
             // A game's resolution view (the tallest list), 20 resolutions. Before U1: 5, 5, 3, 1; U1: 5, 4, 1, 1.
             Run.Equal(5, FlyoutRowsOn(1080, 1.00, true, 20), "1080p at 100 %: five rows");
             Run.Equal(5, FlyoutRowsOn(1080, 1.50, true, 20), "1080p at 150 %: five rows (U1: four)");
@@ -66,9 +68,11 @@ namespace HdrSwitch.Tests
             Run.Equal(5, FlyoutRowsOn(1440, 1.75, true, 20), "1440p at 175 %: five rows");
             Run.Equal(5, FlyoutRowsOn(1440, 2.00, true, 20), "1440p at 200 %: five rows (U1: four)");
             Run.Equal(2, FlyoutRowsOn(720, 2.00, true, 20), "720p at 200 %: two rows, the list scrolls");
-            // The games list. Before U1: 4 at 175 %, 2 at 200 %; U1: 3 and 1.
+            // The library, search box included. Before U1: 4 at 175 %, 2 at 200 %; U1: 3 and 1.
+            Run.Equal(5, FlyoutRowsOn(1080, 1.50, false, 20), "games at 1080p 150 %: five rows");
             Run.Equal(5, FlyoutRowsOn(1080, 1.75, false, 20), "games at 1080p 175 %: five rows (U1: three)");
             Run.Equal(5, FlyoutRowsOn(1080, 2.00, false, 20), "games at 1080p 200 %: five rows (U1: one)");
+            Run.Equal(3, FlyoutRowsOn(720, 2.00, false, 20), "games at 720p 200 %: three rows, the list scrolls");
             // Never more than the list has, never fewer than one.
             Run.Equal(2, FlyoutRowsOn(1080, 1.00, false, 2), "two games: two rows");
             Run.Equal(1, FlyoutRowsOn(1080, 1.00, false, 0), "no games: one row for the message");
@@ -277,29 +281,32 @@ namespace HdrSwitch.Tests
             var trail = new TrayApp.FlyoutTrail();
             string from;
             double at;
-            trail.Push("mon:doom", 132);       // the monitor symbol of a game scrolled down to, into its resolutions
-            trail.Push("mode:bright", 0);      // its SDR brightness row, into the levels
-            Run.True(trail.Pop(1, out from, out at), "back from the levels");
-            Run.Equal("mode:bright", from, "on the SDR brightness row again");
-            Run.Equal(0.0, at, "the resolution list as it was");
-            Run.True(trail.Pop(0, out from, out at), "back from the resolutions");
-            Run.Equal("mon:doom", from, "on the game's monitor symbol again");
-            Run.Equal(132.0, at, "the games list scrolled where it was");
+            trail.Push("row:doom", 132);       // a game's row, scrolled down to: into its page
+            trail.Push("card:stretch", 210);   // its Stretch card, the page scrolled: into the stretch list
+            Run.True(trail.Pop(1, out from, out at), "back from the stretch list");
+            Run.Equal("card:stretch", from, "on the Stretch card again");
+            Run.Equal(210.0, at, "the page scrolled as it was");
+            Run.True(trail.Pop(0, out from, out at), "back from the page");
+            Run.Equal("row:doom", from, "on the game's row again");
+            Run.Equal(132.0, at, "the library scrolled where it was");
             Run.True(!trail.Pop(0, out from, out at), "nothing more to go back to");
 
-            trail.Push("mon:doom", 132);
-            trail.Push("mode:stretch", 44);
-            Run.True(trail.Pop(0, out from, out at), "a stretched resolution chosen: two views close at once");
-            Run.Equal("mon:doom", from, "on the game's row, not the view in between");
-            Run.Equal(132.0, at, "scrolled where the games list was");
-            Run.Equal(0, trail.Count, "nothing left behind");
+            trail.Push("row:doom", 132);
+            trail.Push("seg:more", 96);        // More… under the area: into the resolutions
+            Run.True(trail.Pop(1, out from, out at), "a size picked: back to the page, not the library");
+            Run.Equal("seg:more", from, "on More… again");
+            Run.Equal(96.0, at, "the page where it was");
+            Run.Equal(1, trail.Count, "the page's own step stays, for its back button");
         }
 
         public static void FlyoutPencilFile()
         {
-            Run.Equal("games.txt", Path.GetFileName(TrayApp.FlyoutFile(false, false)), "the games list: games.txt");
-            Run.Equal("resolutions.txt", Path.GetFileName(TrayApp.FlyoutFile(true, false)), "a game's resolutions: resolutions.txt");
-            Run.Equal("brightness.txt", Path.GetFileName(TrayApp.FlyoutFile(true, true)), "its SDR brightness levels: brightness.txt");
+            Run.Equal("games.txt", Path.GetFileName(TrayApp.FlyoutFile("games", false)), "the library: games.txt");
+            Run.Equal("games.txt", Path.GetFileName(TrayApp.FlyoutFile("add", false)), "the programs to add: games.txt");
+            Run.Equal("resolutions.txt", Path.GetFileName(TrayApp.FlyoutFile("game", false)), "a game's page: resolutions.txt");
+            Run.Equal("brightness.txt", Path.GetFileName(TrayApp.FlyoutFile("game", true)), "… with its SDR brightness card open: brightness.txt");
+            Run.Equal("resolutions.txt", Path.GetFileName(TrayApp.FlyoutFile("res", false)), "the area's resolutions: resolutions.txt");
+            Run.Equal("resolutions.txt", Path.GetFileName(TrayApp.FlyoutFile("stretch", false)), "the stretch list: resolutions.txt");
         }
     }
 }
