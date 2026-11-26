@@ -107,6 +107,7 @@ namespace HdrSwitch
             /// <summary>The search becomes text: the list filters, starts at the top, and the keyboard is in the box.</summary>
             void Type(string text)
             {
+                bool there = OnSearch();   // already in the box: a screen reader hears the new text (Tell), not the focus again
                 search = text;
                 ScrollHome();
                 wheel = 0;
@@ -114,7 +115,7 @@ namespace HdrSwitch
                 keyboard = true;
                 Rebuild();
                 int i = items.FindIndex(it => it.Key == SearchKey);
-                if (i >= 0) SetFocus(i);
+                if (i >= 0 && !there) SetFocus(i);
             }
 
             /// <summary>Enter in the search box: the first game it finds.</summary>
@@ -462,7 +463,7 @@ namespace HdrSwitch
                 Scroller(from, new Rectangle(0, top, W, shown), content, rowCH);
                 y = top + shown + S(8);
                 string file = FlyoutFile("game", brightOpen);
-                GamesFooter(W, M, y, barH, Roll("count", "Saved in " + System.IO.Path.GetFileName(file), fonts.Caption), file);
+                GamesFooter(W, M, y, barH, Roll("foot:page", "Saved in " + System.IO.Path.GetFileName(file), fonts.Caption), file);
                 return y + barH;
             }
 
@@ -576,8 +577,9 @@ namespace HdrSwitch
                     Theme.Dot(g, at, cy, S(18), P.Surface);
                     float inner = S(12) + (S(14) - S(12)) * (float)Math.Max(0, Math.Min(1, lk.Hover));
                     Theme.Dot(g, at, cy, inner, own ? P.Accent : P.Ink(P.Text3, bg));
-                    string nits = own ? BrightnessNits(lv) + " nits" : "Windows'";
-                    Draw(g, nits, fonts.Caption, P.Ink(P.Text2, bg), new Rectangle(rc.Right + S(8), rc.Y, nitsW, rc.Height), TfLeft | TextFormatFlags.Right);
+                    // What the thumb's place means; for Windows' own, dimmed: the level Windows has now.
+                    int at_ = own ? lv : StepBrightness(-1, windowsLevel, 0);
+                    Draw(g, BrightnessNits(at_) + " nits", fonts.Caption, P.Ink(own ? P.Text2 : P.Text3, bg), new Rectangle(rc.Right + S(8), rc.Y, nitsW, rc.Height), TfLeft | TextFormatFlags.Right);
                 } });
 
                 // "Use Windows' level": a check box. Unticked, the game gets Windows' level now as its own.
@@ -793,7 +795,7 @@ namespace HdrSwitch
                 y = c3.Bottom + G;
                 string file = FlyoutFile(picking ? "add" : sub, false);
                 string foot = picking ? "Programs with a window open" : "Saved in " + System.IO.Path.GetFileName(file);
-                GamesFooter(W, M, y, S(48), Roll("count", foot, fonts.Caption), file);
+                GamesFooter(W, M, y, S(48), Roll("foot:list", foot, fonts.Caption), file);
                 return y + S(48);
             }
         }
