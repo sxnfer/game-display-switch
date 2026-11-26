@@ -1800,18 +1800,9 @@ namespace HdrSwitch
             var skip = new HashSet<string> { "explorer", "hdrswitch", "applicationframehost", "textinputhost", "systemsettings",
                 "shellexperiencehost", "searchhost", "startmenuexperiencehost", "lockapp", "notepad" };
             var names = new SortedSet<string>();
-            foreach (var p in Process.GetProcesses())
-            {
-                using (p)
-                {
-                    try
-                    {
-                        string n = p.ProcessName.ToLowerInvariant();
-                        if (!skip.Contains(n) && p.MainWindowHandle != IntPtr.Zero) names.Add(n);
-                    }
-                    catch { }   // process ended meanwhile
-                }
-            }
+            var windowed = Proc.WindowedPids();   // one pass over the windows, not one per process
+            foreach (var p in Proc.Snapshot())
+                if (windowed.Contains(p.Key) && !skip.Contains(p.Value)) names.Add(p.Value);
             return names;
         }
 
@@ -2140,27 +2131,46 @@ namespace HdrSwitch
             new Thread(Watch) { IsBackground = true, Name = "Steam watcher" }.Start();
         }
 
+        /// <summary>
+        /// Follows Steam's key while it is there. Without it (Steam installed after the app started, or uninstalled) it
+        /// looks again once a minute: one registry lookup, so it costs nothing either. Meanwhile, and if the key can't be
+        /// read, switching still works through the process scan.
+        /// </summary>
         void Watch()
         {
-            try
+            bool logged = false;
+            while (true)
             {
-                using (var key = Registry.CurrentUser.OpenSubKey(AppsKey))
-                using (var changed = new AutoResetEvent(false))
+                try
                 {
-                    if (key == null) return;   // no Steam
-                    var wasRunning = RunningApps(key);
-                    while (true)
-                    {
-                        if (RegNotifyChangeKeyValue(key.Handle, true, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET, changed.SafeWaitHandle, true) != 0) return;
-                        if (WaitHandle.WaitAny(new WaitHandle[] { stop, changed }) == 0) return;
-                        var now = RunningApps(key);
-                        foreach (int id in now)
-                            if (!wasRunning.Contains(id)) onStarted(id);
-                        wasRunning = now;
-                    }
+                    using (var key = Registry.CurrentUser.OpenSubKey(AppsKey))
+                        if (key != null && Follow(key)) return;
+                }
+                catch (Exception e)   // the key vanished mid-watch or is unreadable
+                {
+                    if (!logged) Guard.Log("Steam watcher", e);
+                    logged = true;
+                }
+                if (stop.WaitOne(60000)) return;
+            }
+        }
+
+        /// <summary>Reports each app Steam marks as running until stopped (true), or until Windows won't watch the key (false).</summary>
+        bool Follow(RegistryKey key)
+        {
+            using (var changed = new AutoResetEvent(false))
+            {
+                var wasRunning = RunningApps(key);
+                while (true)
+                {
+                    if (RegNotifyChangeKeyValue(key.Handle, true, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET, changed.SafeWaitHandle, true) != 0) return false;
+                    if (WaitHandle.WaitAny(new WaitHandle[] { stop, changed }) == 0) return true;
+                    var now = RunningApps(key);
+                    foreach (int id in now)
+                        if (!wasRunning.Contains(id)) onStarted(id);
+                    wasRunning = now;
                 }
             }
-            catch { }   // Steam's key vanished or is unreadable: switching still works through the process scan
         }
 
         static HashSet<int> RunningApps(RegistryKey apps)
@@ -2246,27 +2256,62 @@ namespace HdrSwitch
             @"Program Files\Steam\steamapps\common", "Riot Games"
         };
 
-        // Not games: launcher/overlay tools that would turn HDR on whenever they are in front.
-        static readonly Regex Tool = new Regex(@"Redistributable|Proton|Steam Linux Runtime|Steamworks|SteamVR|Wallpaper Engine|Lossless Scaling|Soundpad|Unreal Engine|Steam Controller Configs", RegexOptions.IgnoreCase);
-        static readonly Regex SkipExe = new Regex(@"^(unins.*|setup.*|.*install.*|.*redist.*|dxsetup|ue\dprereq.*|.*crash.*|.*report.*|.*easyanticheat.*|eac(launcher)?|.*battleye.*|be_.*|.*update.*|.*helper.*|.*cef.*|.*browser.*|dotnet.*|vc_.*|.*touchup.*|.*cleanup.*|.*activation.*|quicksfv|.*benchmark.*|.*server.*|.*editor.*|.*diagnostic.*|.*dump.*|7z.*|python.*|.*register.*|vconsole.*|resourcecompiler|.*viewer|hlmv.*|.*tools?|steam|epicgameslauncher|galaxyclient|upc|ubisoftconnect|eadesktop|origin|rockstarservice|launcher|gamelaunchhelper)$", RegexOptions.IgnoreCase);
+        // Not games: launcher/overlay tools that would turn HDR on whenever they are in front. Matched against a label and
+        // a folder name with _ and - read as spaces (see Plain), so Steam's "wallpaper_engine" folder is Wallpaper Engine.
+        // "UE 5.4" is an Unreal Engine install (Epic's UE_5.4 folder).
+        static readonly Regex Tool = new Regex(@"Redistributable|Proton|Steam ?Linux ?Runtime|Steamworks|SteamVR|Wallpaper Engine|Lossless Scaling|Soundpad|Unreal Engine|^UE \d|Steam Controller Configs", RegexOptions.IgnoreCase);
+        // Launchers that install into the same folders as their games and start with Windows: Riot Games\Riot Client,
+        // Rockstar Games\Social Club. A folder called Launcher only counts under Rockstar Games and Epic Games (LauncherOf).
+        static readonly Regex LauncherDir = new Regex(@"^(Riot Client|Social Club)$", RegexOptions.IgnoreCase);
+        static readonly Regex LauncherOf = new Regex(@"^(Rockstar Games|Epic Games)$", RegexOptions.IgnoreCase);
+        // dosbox and scummvm: GOG runs every DOS and adventure classic through its own copy of one of them, so the
+        // process (all this app sees of a running game) is the same for all of them and can't be told apart.
+        static readonly Regex SkipExe = new Regex(@"^(unins.*|setup.*|.*install.*|.*redist.*|dxsetup|ue\dprereq.*|.*crash.*|.*report.*|.*easyanticheat.*|eac(launcher)?|.*battleye.*|be_.*|.*update.*|.*helper.*|.*cef.*|.*browser.*|dotnet.*|vc_.*|.*touchup.*|.*cleanup.*|.*activation.*|quicksfv|.*benchmark.*|.*server.*|.*editor.*|.*diagnostic.*|.*dump.*|7z.*|python.*|.*register.*|vconsole.*|resourcecompiler|.*viewer|hlmv.*|.*tools?|steam|epicgameslauncher|galaxyclient|upc|ubisoftconnect|eadesktop|origin|rockstarservice|launcher|gamelaunchhelper|dosbox.*|scummvm)$", RegexOptions.IgnoreCase);
         static readonly Regex SkipDir = new Regex(@"^(_?commonredist|_?redist|redistributables?|directx|vcredist|dotnet.*|support|installers?|__installer|prereq.*|thirdparty|easyanticheat|battleye|crashpad|paks|movies?|videos?|audio|sounds?|localization|shaders?|__overlay|tools|mods?|\.git)$", RegexOptions.IgnoreCase);
 
         public static List<Found> Scan()
         {
             var folders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // game folder → label
             var exes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);      // exe named by a launcher → label
-            Try(() => Steam(folders));
-            Try(() => Epic(folders, exes));
-            Try(() => Gog(folders, exes));
-            Try(() => Ubisoft(folders));
-            Try(() => Installed(folders));
-            Try(() => Xbox(folders));
-            Try(() => Drives(folders));
+            Try("Steam", () => Steam(folders));
+            Try("Epic", () => Epic(folders, exes));
+            Try("GOG", () => Gog(folders, exes));
+            Try("Ubisoft", () => Ubisoft(folders));
+            Try("installed apps", () => Installed(folders));
+            Try("Xbox", () => Xbox(folders));
+            Try("drives", () => Drives(folders));
 
             var found = new Dictionary<string, Found>();
             foreach (var kv in exes) Add(found, kv.Key, kv.Value);
-            foreach (var kv in folders) Add(found, MainExe(kv.Key), kv.Value);
+            foreach (var kv in folders)
+                if (kv.Value != null) Add(found, MainExe(kv.Key), kv.Value);   // null: a tool or a launcher (AddFolder)
             return found.Values.ToList();
+        }
+
+        /// <summary>
+        /// True for a tool or a launcher rather than a game, from its label ("Steam: Wallpaper Engine"), its folder's name
+        /// ("wallpaper_engine") and the name of the folder that one is in ("Rockstar Games"). Every source's folders go
+        /// through here (AddFolder), so a folder that one pass knows as a tool isn't added by another under another name.
+        /// </summary>
+        internal static bool NotAGame(string label, string folder, string parent)
+        {
+            string l = Plain(label), f = Plain(folder);
+            int colon = l.IndexOf(": ");
+            string bare = colon > 0 && colon < 10 ? l.Substring(colon + 2) : l;   // without the launcher's "Steam: "
+            return Tool.IsMatch(l) || Tool.IsMatch(f) || LauncherDir.IsMatch(bare) || LauncherDir.IsMatch(f)
+                || (f.Equals("Launcher", StringComparison.OrdinalIgnoreCase) && LauncherOf.IsMatch(Plain(parent)));
+        }
+
+        /// <summary>True for an exe that is never taken as a game: a setup, a crash reporter, a launcher, DOSBox, …</summary>
+        internal static bool SkippedExe(string name)
+        {
+            return SkipExe.IsMatch(name);
+        }
+
+        /// <summary>"wallpaper_engine" → "wallpaper engine": _ and - as spaces, runs of spaces as one.</summary>
+        static string Plain(string s)
+        {
+            return s == null ? "" : Regex.Replace(s.Replace('_', ' ').Replace('-', ' '), @"\s+", " ").Trim();
         }
 
         static void Add(Dictionary<string, Found> found, string exe, string label)
@@ -2276,15 +2321,28 @@ namespace HdrSwitch
             found[name] = new Found { Name = name, Label = label };
         }
 
-        static void AddFolder(Dictionary<string, string> folders, string path, string label)
+        /// <summary>
+        /// Adds a game's folder, unless it is a tool or a launcher (NotAGame): that one is kept with a null label, so the
+        /// pass over the drives' game folders, which goes by folder names, can't add it again. False for such a folder.
+        /// </summary>
+        internal static bool AddFolder(Dictionary<string, string> folders, string path, string label)
         {
             try
             {
-                path = Path.GetFullPath(path).TrimEnd('\\');
-                if (!folders.ContainsKey(path) && !Tool.IsMatch(label) && Directory.Exists(path)) folders[path] = label;
+                path = Path.GetFullPath(path).TrimEnd('\\', '/');
+                string known;
+                if (folders.TryGetValue(path, out known)) return known != null;
+                string parent = Path.GetDirectoryName(path);
+                if (NotAGame(label, Path.GetFileName(path), parent == null ? null : Path.GetFileName(parent)))
+                {
+                    folders[path] = null;
+                    return false;
+                }
+                if (Directory.Exists(path)) folders[path] = label;
             }
             catch (ArgumentException) { }
             catch (NotSupportedException) { }
+            return true;
         }
 
         /// <summary>Every Steam library's steamapps folder.</summary>
@@ -2292,46 +2350,69 @@ namespace HdrSwitch
         {
             var result = new List<string>();
             string steam = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", null) as string;
-            if (steam == null) return result;
+            if (string.IsNullOrEmpty(steam)) return result;
             var libs = new List<string> { steam };
-            string vdf = Path.Combine(steam, @"steamapps\libraryfolders.vdf");
-            if (File.Exists(vdf))
-                foreach (Match m in Regex.Matches(File.ReadAllText(vdf), "\"path\"\\s+\"([^\"]+)\""))
-                    libs.Add(m.Groups[1].Value.Replace(@"\\", @"\"));
+            Try("Steam's library list", () =>
+            {
+                string vdf = Path.Combine(steam, @"steamapps\libraryfolders.vdf");
+                if (File.Exists(vdf))
+                    foreach (Match m in Regex.Matches(File.ReadAllText(vdf), "\"path\"\\s+\"([^\"]+)\""))
+                        libs.Add(m.Groups[1].Value.Replace(@"\\", @"\"));
+            });
             foreach (string lib in libs.Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                string apps = Path.Combine(lib, "steamapps");
-                if (Directory.Exists(apps)) result.Add(apps);
+                Try("Steam library " + lib, () =>   // a path with a typo, or a drive that is gone, skips only that library
+                {
+                    string apps = Path.Combine(lib, "steamapps");
+                    if (Directory.Exists(apps)) result.Add(apps);
+                });
             }
             return result;
         }
 
         /// <summary>"Steam: Dying Light: The Beast" for a Steam app id – the label the scan gives that game.</summary>
+        /// <summary>Never throws: it runs on the UI thread, the moment Play is pressed.</summary>
         public static string SteamLabel(int appId)
         {
-            try
+            List<string> libraries = null;
+            Try("Steam's libraries", () => libraries = SteamApps());
+            if (libraries == null) return null;
+            foreach (string apps in libraries)
             {
-                foreach (string apps in SteamApps())
+                string label = null;
+                Try("Steam app " + appId + " in " + apps, () =>
                 {
                     string acf = Path.Combine(apps, "appmanifest_" + appId + ".acf");
-                    if (!File.Exists(acf)) continue;
+                    if (!File.Exists(acf)) return;
                     string text = File.ReadAllText(acf);
-                    return "Steam: " + (Vdf(text, "name") ?? Vdf(text, "installdir"));
-                }
+                    label = "Steam: " + (Vdf(text, "name") ?? Vdf(text, "installdir"));
+                });
+                if (label != null) return label;
             }
-            catch (IOException) { }
             return null;
         }
 
         static void Steam(Dictionary<string, string> folders)
         {
-            foreach (string apps in SteamApps())
+            SteamLibraries(SteamApps(), folders);
+        }
+
+        /// <summary>The games in these steamapps folders. A library or a manifest that can't be read skips only itself.</summary>
+        internal static void SteamLibraries(IEnumerable<string> libraries, Dictionary<string, string> folders)
+        {
+            foreach (string apps in libraries)
             {
-                foreach (string acf in Directory.GetFiles(apps, "appmanifest_*.acf"))
+                string[] manifests = null;
+                Try("Steam library " + apps, () => manifests = Directory.GetFiles(apps, "appmanifest_*.acf"));
+                if (manifests == null) continue;
+                foreach (string acf in manifests)
                 {
-                    string text = File.ReadAllText(acf);
-                    string dir = Vdf(text, "installdir");
-                    if (dir != null) AddFolder(folders, Path.Combine(apps, "common", dir), "Steam: " + (Vdf(text, "name") ?? dir));
+                    Try(acf, () =>
+                    {
+                        string text = File.ReadAllText(acf);
+                        string dir = Vdf(text, "installdir");
+                        if (dir != null) AddFolder(folders, Path.Combine(apps, "common", dir), "Steam: " + (Vdf(text, "name") ?? dir));
+                    });
                 }
             }
         }
@@ -2342,12 +2423,14 @@ namespace HdrSwitch
             if (!Directory.Exists(dir)) return;
             foreach (string item in Directory.GetFiles(dir, "*.item"))
             {
-                string json = File.ReadAllText(item);
-                string loc = Json(json, "InstallLocation"), exe = Json(json, "LaunchExecutable");
-                if (loc == null || json.IndexOf("\"games\"", StringComparison.OrdinalIgnoreCase) < 0) continue;   // AppCategories: games only
-                string label = "Epic: " + (Json(json, "DisplayName") ?? Path.GetFileName(loc));
-                AddFolder(folders, loc, label);
-                if (!string.IsNullOrEmpty(exe) && !Tool.IsMatch(label)) exes[Path.Combine(loc, exe)] = label;
+                Try(item, () =>
+                {
+                    string json = File.ReadAllText(item);
+                    string loc = Json(json, "InstallLocation"), exe = Json(json, "LaunchExecutable");
+                    if (loc == null || json.IndexOf("\"games\"", StringComparison.OrdinalIgnoreCase) < 0) return;   // AppCategories: games only
+                    string label = "Epic: " + (Json(json, "DisplayName") ?? Path.GetFileName(loc));
+                    if (AddFolder(folders, loc, label) && !string.IsNullOrEmpty(exe)) exes[Path.Combine(loc, exe)] = label;
+                });
             }
         }
 
@@ -2358,14 +2441,17 @@ namespace HdrSwitch
                 if (key == null) return;
                 foreach (string id in key.GetSubKeyNames())
                 {
-                    using (var g = key.OpenSubKey(id))
+                    Try("GOG game " + id, () =>
                     {
-                        if (g == null || !string.IsNullOrEmpty(g.GetValue("dependsOn") as string)) continue;   // DLC: same folder as its game
-                        string path = g.GetValue("path") as string, exe = g.GetValue("exe") as string;
-                        string label = "GOG: " + (g.GetValue("gameName") as string ?? id);
-                        if (path != null) AddFolder(folders, path, label);
-                        if (exe != null) exes[exe] = label;
-                    }
+                        using (var g = key.OpenSubKey(id))
+                        {
+                            if (g == null || !string.IsNullOrEmpty(g.GetValue("dependsOn") as string)) return;   // DLC: same folder as its game
+                            string path = g.GetValue("path") as string, exe = g.GetValue("exe") as string;
+                            string label = "GOG: " + (g.GetValue("gameName") as string ?? id);
+                            bool game = path != null ? AddFolder(folders, path, label) : !NotAGame(label, null, null);
+                            if (game && exe != null) exes[exe] = label;
+                        }
+                    });
                 }
             }
         }
@@ -2377,11 +2463,14 @@ namespace HdrSwitch
                 if (key == null) return;
                 foreach (string id in key.GetSubKeyNames())
                 {
-                    using (var g = key.OpenSubKey(id))
+                    Try("Ubisoft game " + id, () =>
                     {
-                        string path = g == null ? null : g.GetValue("InstallDir") as string;
-                        if (path != null) AddFolder(folders, path, "Ubisoft: " + Path.GetFileName(path.TrimEnd('\\', '/')));
-                    }
+                        using (var g = key.OpenSubKey(id))
+                        {
+                            string path = g == null ? null : g.GetValue("InstallDir") as string;
+                            if (path != null) AddFolder(folders, path, "Ubisoft: " + Path.GetFileName(path.TrimEnd('\\', '/')));
+                        }
+                    });
                 }
             }
         }
@@ -2425,7 +2514,7 @@ namespace HdrSwitch
                     if (key == null) continue;
                     foreach (string id in key.GetSubKeyNames())
                     {
-                        Try(() =>
+                        Try("installed app " + id, () =>
                         {
                             using (var g = key.OpenSubKey(id))
                             {
@@ -2448,19 +2537,25 @@ namespace HdrSwitch
         {
             foreach (var drive in DriveInfo.GetDrives())
             {
-                if (drive.DriveType != DriveType.Fixed || !drive.IsReady) continue;
-                string file = Path.Combine(drive.RootDirectory.FullName, ".GamingRoot");
-                if (!File.Exists(file)) continue;
-                foreach (string root in GamingRoots(File.ReadAllBytes(file)))
+                Try("Xbox games on " + drive.Name, () =>   // one drive that can't be read skips only its own games
                 {
-                    string dir = Path.Combine(drive.RootDirectory.FullName, root.TrimStart('\\', '/'));
-                    if (!Directory.Exists(dir)) continue;
-                    foreach (string game in Directory.GetDirectories(dir))
+                    if (drive.DriveType != DriveType.Fixed || !drive.IsReady) return;
+                    string file = Path.Combine(drive.RootDirectory.FullName, ".GamingRoot");
+                    if (!File.Exists(file)) return;
+                    foreach (string root in GamingRoots(File.ReadAllBytes(file)))
                     {
-                        string content = Path.Combine(game, "Content");
-                        AddFolder(folders, Directory.Exists(content) ? content : game, "Xbox: " + Path.GetFileName(game));
+                        Try("Xbox folder " + root + " on " + drive.Name, () =>
+                        {
+                            string dir = Path.Combine(drive.RootDirectory.FullName, root.TrimStart('\\', '/'));
+                            if (!Directory.Exists(dir)) return;
+                            foreach (string game in Directory.GetDirectories(dir))
+                            {
+                                string content = Path.Combine(game, "Content");
+                                AddFolder(folders, Directory.Exists(content) ? content : game, "Xbox: " + Path.GetFileName(game));
+                            }
+                        });
                     }
-                }
+                });
             }
         }
 
@@ -2481,20 +2576,23 @@ namespace HdrSwitch
         {
             foreach (var drive in DriveInfo.GetDrives())
             {
-                if (drive.DriveType != DriveType.Fixed || !drive.IsReady) continue;
-                foreach (string root in DriveRoots)
+                Try("game folders on " + drive.Name, () =>
                 {
-                    string dir = Path.Combine(drive.RootDirectory.FullName, root);
-                    if (!Directory.Exists(dir)) continue;
-                    try
+                    if (drive.DriveType != DriveType.Fixed || !drive.IsReady) return;
+                    foreach (string root in DriveRoots)
                     {
-                        foreach (string game in Directory.GetDirectories(dir))
-                            AddFolder(folders, game, Path.GetFileName(game));
+                        string dir = Path.Combine(drive.RootDirectory.FullName, root);
+                        if (Directory.Exists(dir)) Try(dir, () => Subfolders(dir, folders));
                     }
-                    catch (UnauthorizedAccessException) { }
-                    catch (IOException) { }
-                }
+                });
             }
+        }
+
+        /// <summary>Each folder in dir as a game, by its folder's name – but not a tool or a launcher (AddFolder).</summary>
+        internal static void Subfolders(string dir, Dictionary<string, string> folders)
+        {
+            foreach (string game in Directory.GetDirectories(dir))
+                AddFolder(folders, game, Path.GetFileName(game));
         }
 
         /// <summary>The largest exe in a game folder (5 levels deep), skipping installers, redistributables and helpers.</summary>
@@ -2538,9 +2636,11 @@ namespace HdrSwitch
             try { return Regex.Unescape(m.Groups[1].Value); } catch (ArgumentException) { return m.Groups[1].Value; }
         }
 
-        static void Try(Action a)
+        /// <summary>One step of the scan: an error in it (a locked manifest, a library on a drive that is gone) skips that step only, and is logged.</summary>
+        static void Try(string what, Action a)
         {
-            try { a(); } catch { }   // one broken library must not stop the rest of the scan
+            try { a(); }
+            catch (Exception e) { Guard.Log("Game scan skipped " + what + ": " + e.GetType().Name + ": " + e.Message); }
         }
     }
 
@@ -2603,6 +2703,25 @@ namespace HdrSwitch
             var mi = new MonitorInfoEx { Size = Marshal.SizeOf(typeof(MonitorInfoEx)) };
             return GetMonitorInfo(mon, ref mi) ? mi.Device : null;
         }
+
+        /// <summary>
+        /// The processes with a main window: a visible top-level window that no other window owns, as
+        /// Process.MainWindowHandle counts one – but found in one pass over the windows instead of one per process.
+        /// </summary>
+        public static HashSet<int> WindowedPids()
+        {
+            var pids = new HashSet<int>();
+            EnumWindows((h, l) =>
+            {
+                uint owner;
+                if (IsWindowVisible(h) && GetWindow(h, GW_OWNER) == IntPtr.Zero && GetWindowThreadProcessId(h, out owner) != 0) pids.Add((int)owner);
+                return true;
+            }, IntPtr.Zero);
+            return pids;
+        }
+
+        const uint GW_OWNER = 4;
+        [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
 
         delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr param);
         [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
