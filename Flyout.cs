@@ -1187,9 +1187,9 @@ namespace HdrSwitch
                 int openW = TextRenderer.MeasureText("Open folder", fonts.Body, Size.Empty, TfLeft).Width + S(24);
                 var exit = new Rectangle(W - M - exitW, y + (barH - S(32)) / 2, exitW, S(32));
                 var open = new Rectangle(exit.X - S(8) - openW, exit.Y, openW, S(32));
-                const string Where_ = @"Files in %AppData%\HdrSwitch";
+                const string FilesAt = @"Files in %AppData%\HdrSwitch";
                 items.Add(new Item { Rect = new Rectangle(M + S(4), y, open.X - S(8) - M - S(4), barH), Paint = (g, rc, lk) =>
-                    Draw(g, Where_, fonts.Caption, P.Ink(P.Text2, fbg), rc, TfLeft) });
+                    Draw(g, FilesAt, fonts.Caption, P.Ink(P.Text2, fbg), rc, TfLeft) });
                 items.Add(new Item { Rect = open, Key = "folder", Name = "Open folder", Tip = Dir, Click = () =>
                 {
                     Dismiss(true);   // at once: Explorer is about to come to the front
@@ -2201,7 +2201,7 @@ namespace HdrSwitch
                 app.res = new ActiveMode { Gdi = display.Gdi, Game = game, Back = desktop, ScalingBack = stretched ? -1 : 2,
                     Mode = stretched ? new Resolution.Mode { Width = 1776, Height = 1332, Hz = 240 } : new Resolution.Mode { Width = 2368, Height = 1332, Hz = 240 },
                     Area = stretched ? new Resolution.Mode { Width = 2368, Height = 1332, Hz = 240 } : null };
-                if (!stretched) { app.brightBack = Hdr.LevelOf(20); app.brightSet = Hdr.LevelOf(40); }
+                if (state == "running") { app.brightBack = Hdr.LevelOf(20); app.brightSet = Hdr.LevelOf(40); }
             }
             else if (state == "recording")
             {

@@ -120,7 +120,7 @@ namespace HdrSwitch
             scaling.Value = scaling.Active ? "No scaling" : game || s.Area != null ? "Unchanged" : NoValue;
             scaling.Desc = s.ScalingTaken ? "Set automatically, put back after"
                 : s.ScalingStray ? "Still to be put back"
-                : s.Stretch != null ? "Left alone: a stretched game doesn't need it"
+                : s.Stretch != null ? "Not needed for a stretch"
                 : s.Paused ? "Paused"
                 : s.Area != null ? "Left alone: it already centres"
                 : "Set with a competitive area";

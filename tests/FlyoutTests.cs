@@ -176,7 +176,7 @@ namespace HdrSwitch.Tests
             Run.Equal("hdr=ON* bright=Windows' area=2368 × 1332* stretch=1776 × 1332* scaling=Unchanged", Layers(s), "area and stretch in effect, scaling left alone");
             Run.Equal("Centred, 92.5 % · 24.5″", Layer(s, "area").Desc, "how much of the panel");
             Run.Equal("Stretched over 2368 × 1332", Layer(s, "stretch").Desc, "stretched over the area");
-            Run.Equal("Left alone: a stretched game doesn't need it", Layer(s, "scaling").Desc, "why scaling is unchanged");
+            Run.Equal("Not needed for a stretch", Layer(s, "scaling").Desc, "why scaling is unchanged");
             s.StretchLost = true;
             Run.Equal("The game set its own mode since", Layer(s, "stretch").Desc, "the game's own mode took over");
             var area = new TrayApp.LiveState { Game = "cs2.exe", GameArea = true, Area = Mode(2368, 1332), BackTo = "2560 × 1440" };
