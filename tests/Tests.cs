@@ -439,5 +439,133 @@ namespace HdrSwitch.Tests
             Run.Equal("beef", Updater.ExpectedHash("beef *HdrSwitch.exe"), "binary-mode marker");
             Run.Equal<string>(null, Updater.ExpectedHash("ffff  other.exe"), "no line for the exe");
         }
+
+        public static void ChecksumLineWithVersion()
+        {
+            // The format the release workflow writes since the version went into the signed file: a copy from before
+            // that reads it as well – it only looks for the line ending in " HdrSwitch.exe".
+            string sums = "# version 1.8.0\r\n0123ABCD  HdrSwitch.exe\r\n";
+            Run.Equal("0123abcd", Updater.ExpectedHash(sums), "the exe's line, past the version line");
+            Run.Equal("0123abcd", Updater.ExpectedHash("0123abcd  HdrSwitch.exe\n# version 1.8.0\n"), "in either order");
+        }
+
+        public static void SignedVersionLine()
+        {
+            Run.Equal(new Version(1, 8, 0), Updater.SignedVersion("# version 1.8.0\r\nabcd  HdrSwitch.exe\r\n"), "the version line");
+            Run.Equal(new Version(1, 8, 0), Updater.SignedVersion("abcd  HdrSwitch.exe\n  #   version \t 1.8.0  \r\n"), "spaces, a tab, CRLF, last");
+            Run.Equal(new Version(1, 8, 0), Updater.SignedVersion("# version 1.8\n"), "two parts read as three, as the tag is");
+            Run.Equal(new Version(1, 8, 0), Updater.SignedVersion("# built by CI\n# version 1.8.0\n"), "other comments are passed over");
+            Run.Equal<Version>(null, Updater.SignedVersion("abcd  HdrSwitch.exe\r\n"), "no version line");
+            Run.Equal<Version>(null, Updater.SignedVersion(""), "empty");
+            Run.Equal<Version>(null, Updater.SignedVersion(null), "nothing");
+            Run.Equal<Version>(null, Updater.SignedVersion("# version\n"), "no number");
+            Run.Equal<Version>(null, Updater.SignedVersion("# version one.two\n"), "not a number");
+            Run.Equal<Version>(null, Updater.SignedVersion("# version 1.8.0 extra\n"), "something after it");
+            Run.Equal<Version>(null, Updater.SignedVersion("# version v1.8.0\n"), "the tag's v is not written");
+            Run.Equal<Version>(null, Updater.SignedVersion("# version 1.8.0\n# version 9.0.0\n"), "two versions: neither is believed");
+            Run.Equal<Version>(null, Updater.SignedVersion("version 1.8.0\n"), "not a comment line");
+            Run.Equal<Version>(null, Updater.SignedVersion("# Version 1.8.0\n"), "spelled differently");
+        }
+
+        /// <summary>A release as GitHub lists it, with the three files under the tag.</summary>
+        static string ReleaseFor(string tag)
+        {
+            return ReleaseJson.Replace("v1.7.0", tag);
+        }
+
+        /// <summary>Signs sums with key as the release workflow does, and serves the files the way Offer fetches them.</summary>
+        static Func<string, byte[]> Serve(System.Security.Cryptography.RSACryptoServiceProvider key, string sums, List<string> fetched)
+        {
+            byte[] bytes = System.Text.Encoding.ASCII.GetBytes(sums);
+            string sig = Convert.ToBase64String(key.SignData(bytes, "SHA256"));
+            return url =>
+            {
+                fetched.Add(url.Substring(url.LastIndexOf('/') + 1));
+                if (url.EndsWith("/SHA256SUMS.txt")) return bytes;
+                if (url.EndsWith("/SHA256SUMS.txt.sig")) return System.Text.Encoding.ASCII.GetBytes(sig);
+                throw new InvalidOperationException("only the checksum file and its signature are fetched before offering: " + url);
+            };
+        }
+
+        public static void UpdateOfferedOnlyWhenSignedForItsTag()
+        {
+            string dir = TempDir();   // a release that isn't offered is logged with the reason
+            try
+            {
+                using (var key = new System.Security.Cryptography.RSACryptoServiceProvider(2048))
+                using (var other = new System.Security.Cryptography.RSACryptoServiceProvider(2048))
+                {
+                    key.PersistKeyInCsp = other.PersistKeyInCsp = false;
+                    string pub = key.ToXmlString(false);
+                    var current = new Version(1, 6, 1);
+                    const string Sums = "# version 1.7.0\r\n0123abcd  HdrSwitch.exe\r\n";
+                    var fetched = new List<string>();
+
+                    var r = Updater.Offer(ReleaseFor("v1.7.0"), current, Serve(key, Sums, fetched), pub);
+                    Run.True(r != null && r.VersionText == "1.7.0", "signed, and built as the tag says: offered");
+                    Run.Equal("SHA256SUMS.txt,SHA256SUMS.txt.sig", string.Join(",", fetched), "only the two small files are fetched");
+
+                    Run.True(Updater.Offer(ReleaseFor("v99.0.0"), current, Serve(key, Sums, new List<string>()), pub) == null,
+                        "an older signed build under a newer tag is not offered");
+                    Run.True(LogText().Contains("Update to 99.0.0 not offered: the release is tagged 99.0.0 but was built as 1.7.0"), "and the log says why");
+                    Run.True(Updater.Offer(ReleaseFor("v1.7.1"), current, Serve(key, Sums, new List<string>()), pub) == null,
+                        "a tag one step off is not offered");
+                    Run.True(Updater.Offer(ReleaseFor("v1.7.0"), new Version(1, 8, 0), Serve(key, Sums, new List<string>()), pub) == null,
+                        "a downgrade is not offered");
+                    Run.True(Updater.Offer(ReleaseFor("v1.7.0"), current, Serve(key, "0123abcd  HdrSwitch.exe\r\n", new List<string>()), pub) == null,
+                        "a checksum file without a version (signed before it carried one) is not offered");
+                    Run.True(Updater.Offer(ReleaseFor("v1.7.0"), current, Serve(other, Sums, new List<string>()), pub) == null,
+                        "signed by another key: not offered");
+                    Run.True(Updater.Offer(ReleaseFor("v1.7.0"), current, Serve(key, "# version 1.7.0\r\n0123abcd  other.exe\r\n", new List<string>()), pub) == null,
+                        "no checksum for the exe: not offered");
+
+                    // A signature over different contents: the file was changed after signing.
+                    var honest = Serve(key, Sums, new List<string>());
+                    Func<string, byte[]> changed = url => url.EndsWith("/SHA256SUMS.txt")
+                        ? System.Text.Encoding.ASCII.GetBytes("# version 99.0.0\r\n0123abcd  HdrSwitch.exe\r\n") : honest(url);
+                    Run.True(Updater.Offer(ReleaseFor("v99.0.0"), current, changed, pub) == null, "a version changed after signing: not offered");
+                    Func<string, byte[]> noSig = url => url.EndsWith(".sig") ? new byte[0] : honest(url);
+                    Run.True(Updater.Offer(ReleaseFor("v1.7.0"), current, noSig, pub) == null, "an empty signature: not offered");
+                }
+            }
+            finally { Clean(dir); }
+        }
+
+        public static void UpdateInstallChecksAgain()
+        {
+            using (var key = new System.Security.Cryptography.RSACryptoServiceProvider(2048))
+            {
+                key.PersistKeyInCsp = false;
+                string pub = key.ToXmlString(false);
+                byte[] exe = { 0x4d, 0x5a, 1, 2, 3 };
+                string hash;
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                    hash = BitConverter.ToString(sha.ComputeHash(exe)).Replace("-", "").ToLowerInvariant();
+                byte[] sums = System.Text.Encoding.ASCII.GetBytes("# version 1.7.0\r\n" + hash + "  HdrSwitch.exe\r\n");
+                string sig = Convert.ToBase64String(key.SignData(sums, "SHA256"));
+                var current = new Version(1, 6, 1);
+                var r = Updater.Parse(ReleaseJson, current);
+
+                Run.True(Updater.Checked(r, sums, sig, exe, pub, current) == exe, "signed, the tag's version, the exe matches");
+                Run.True(Throws(() => Updater.Checked(r, sums, sig, new byte[] { 0x4d, 0x5a, 9 }, pub, current)), "an exe that doesn't match");
+                Run.True(Throws(() => Updater.Checked(Updater.Parse(ReleaseFor("v99.0.0"), current), sums, sig, exe, pub, current)), "a tag that isn't the signed version");
+                Run.True(Throws(() => Updater.Checked(r, sums, sig, exe, pub, new Version(1, 7, 0))), "not newer than this copy");
+                Run.True(Throws(() => Updater.Checked(r, sums, "", exe, pub, current)), "no signature");
+            }
+        }
+
+        static bool Throws(Action a)
+        {
+            try { a(); return false; }
+            catch (Exception) { return true; }
+        }
+
+        public static void UpdateWaitsForGames()
+        {
+            Run.True(!TrayApp.UpdateMustWait(0, false, false), "nothing running: it installs");
+            Run.True(TrayApp.UpdateMustWait(1, false, false), "a followed game is running");
+            Run.True(TrayApp.UpdateMustWait(0, true, false), "the countdown back to SDR / the saved resolution");
+            Run.True(TrayApp.UpdateMustWait(0, false, true), "Steam is starting a game");
+        }
     }
 }

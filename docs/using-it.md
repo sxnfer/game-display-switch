@@ -21,7 +21,7 @@ Click the icon (left or right button) and a small panel slides in by the taskbar
 
 | | |
 |---|---|
-| **Status** | `HDR on` with the game's name, `Waiting for a game`, or `No HDR display`, with an amber dot while HDR is on. A setup hint (for example about a missing resolution) stays here until the game closes. An **Update to …** button appears here when there is one; while it updates it shows each step: Downloading, Verifying, Restarting. |
+| **Status** | `HDR on` with the game's name, `Waiting for a game`, or `No HDR display`, with an amber dot while HDR is on. A setup hint (for example about a missing resolution) stays here until the game closes. An **Update to …** button appears here when there is one; while it updates it shows each step: Downloading, Verifying, Restarting – or *After the game* while a game holds it back. |
 | **Tiles** | **Start with Windows**, **SDR while recording** ([Recording and streaming](recording.md)) and **Island** (see below). A tile is white glass and says **On** while it is on, clear and **Off** otherwise. |
 | **Switch back after** | How long it waits after the last game closes before SDR (and the saved resolution) come back: 3 s, 10 s, 30 s or 60 s, one click for the next. A longer wait helps with launchers that close the game and start it again. |
 | **Pause** | Stops all switching: what Display Switch turned on goes back at once, and nothing switches until you click **Resume**. **Ctrl+Alt+H** does the same from anywhere, even in a game. A pause lasts until you resume or restart the app. |
@@ -55,7 +55,9 @@ The island's shapes and motion are inspired by Apple's Dynamic Island and by the
 
 ## Updates
 
-Display Switch checks this repository once a day. When there is a new version, an **Update to …** button appears at the top of the flyout. One click downloads it, checks it against the release's SHA256 checksum and that checksum file's signature, and restarts the app. A release without a valid signature is never offered. The update check is the only time the app goes online.
+Display Switch checks this repository once a day. When there is a new version, an **Update to …** button appears at the top of the flyout. One click downloads it, checks it against the release's SHA256 checksum and that checksum file's signature, and restarts the app. A release without a valid signature is never offered: the signature, and the version it vouches for, are checked before the button appears, and again before installing. The update check is the only time the app goes online.
+
+An update never restarts the app in the middle of a game, since that would switch HDR and the resolution back under it. Clicking **Update to …** while a game runs downloads and checks the update, and the button says *After the game*; it installs once the game has closed and the display is back. If the new version is in place but doesn't start, you're told to restart Display Switch to finish.
 
 ## Uninstall
 

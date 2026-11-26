@@ -51,9 +51,14 @@ jobs:
 
       - name: Checksum
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
+          # The version goes into the signed file too: the tag isn't signed, and the app only installs a release whose
+          # signed version is its tag. sha256sum -c passes over the # line; the exe's line stays as older copies read it.
+          $version = $env:TAG.Substring(1)   # as build.cmd gets it: the tag without its v
           $hash = (Get-FileHash HdrSwitch.exe -Algorithm SHA256).Hash.ToLower()
-          "$hash  HdrSwitch.exe" | Set-Content SHA256SUMS.txt -Encoding ascii
+          "# version $version", "$hash  HdrSwitch.exe" | Set-Content SHA256SUMS.txt -Encoding ascii
           Get-Content SHA256SUMS.txt
 
       - name: Sign the checksum
