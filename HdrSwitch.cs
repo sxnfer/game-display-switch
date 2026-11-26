@@ -58,6 +58,11 @@ namespace HdrSwitch
                 Environment.ExitCode = TrayApp.RenderFlyout(args);
                 return;
             }
+            if (args.Contains("--render-island"))   // draws the island for one sample act into a PNG (Island.cs)
+            {
+                Environment.ExitCode = Island.RenderSample(args);
+                return;
+            }
             if (args.Contains("--island-demo"))   // a preview of the island alone: before the mutex, so it runs beside an installed copy
             {
                 Application.EnableVisualStyles();
@@ -369,7 +374,7 @@ namespace HdrSwitch
             // The button says so for a moment before it opens up again with the reason underneath.
             updateStep = UpdateFailed;
             flyout.Sync();
-            Announce(new Island.Act { Id = "update", Text = "Update failed", Dot = Theme.Rec, Balloon = "Update failed: " + error });
+            Announce(new Island.Act { Id = "update", Text = "Update failed", Dot = Island.Mark.Critical, Balloon = "Update failed: " + error });
             var back = new System.Windows.Forms.Timer { Interval = 1400 };
             back.Tick += (s2, e2) =>
             {
@@ -434,7 +439,7 @@ namespace HdrSwitch
         void AnnounceGame(string name, bool hdr)
         {
             string sub = hdr ? "HDR on" + (res != null ? " · " + res.Text : "") : res.Text;
-            Announce(new Island.Act { Id = "game", Title = DisplayName(name), Sub = sub, Text = hdr ? "HDR on" : res.Mode.Text, Dot = hdr ? Theme.Amber : Theme.Text1 });
+            Announce(new Island.Act { Id = "game", Title = DisplayName(name), Sub = sub, Text = hdr ? "HDR on" : res.Mode.Text, Dot = hdr ? Island.Mark.Hdr : Island.Mark.On });
         }
 
         /// <summary>
@@ -448,7 +453,7 @@ namespace HdrSwitch
             grace.Restart();
             bool hdr = owned.Count > 0 && !HdrRunning();
             string what = hdr ? "SDR" : res != null && res.Back != null ? res.Back.Text : "Resolution";
-            Announce(new Island.Act { Id = "sdr", Hold = true, Dot = hdr ? Theme.Amber : Theme.Text1,
+            Announce(new Island.Act { Id = "sdr", Hold = true, Dot = hdr ? Island.Mark.Hdr : Island.Mark.On,
                 Live = () => what + " in " + Math.Max(1, (int)Math.Ceiling((sdrDelay * 1000 - grace.ElapsedMilliseconds) / 1000.0)) + "s" });
         }
 
@@ -538,7 +543,7 @@ namespace HdrSwitch
             if (running.Count == 0) notice = null;
             // The countdown ends on what it counted down to, for a moment.
             if (islandOn && (hdrBack || modeBack != null))
-                island.Start(new Island.Act { Id = "sdr", Text = hdrBack ? "SDR" : modeBack, Dot = hdrBack ? Theme.Grey : Theme.Text1, Seconds = 1.5 });
+                island.Start(new Island.Act { Id = "sdr", Text = hdrBack ? "SDR" : modeBack, Dot = Island.Mark.Off, Seconds = 1.5 });
             else island.End("sdr");
             UpdateTray();
         }
@@ -787,11 +792,11 @@ namespace HdrSwitch
                     RestoreBrightness();
                     AllToSdr();
                     if (ours) KeepMode();
-                    Announce(new Island.Act { Id = "rec", Text = RecorderName(name) + " · SDR", Dot = Theme.Grey, Split = true, Bubble = Theme.Rec, Seconds = 4,
+                    Announce(new Island.Act { Id = "rec", Text = RecorderName(name) + " · SDR", Dot = Island.Mark.Off, Split = true, Bubble = Island.Mark.Critical, Seconds = 4,
                         Balloon = "HDR is off while " + RecorderName(name) + " runs." });
                 }
             }
-            else if (HdrRunning() && SwitchOn()) Announce(new Island.Act { Id = "game", Text = "HDR on", Dot = Theme.Amber });
+            else if (HdrRunning() && SwitchOn()) Announce(new Island.Act { Id = "game", Text = "HDR on", Dot = Island.Mark.Hdr });
             UpdateTray();
         }
 
@@ -825,14 +830,14 @@ namespace HdrSwitch
                 RestoreStrayScaling();
                 RestoreBrightness();
                 AllToSdr();
-                Announce(new Island.Act { Id = "pause", Text = "Paused", Dot = Theme.Grey, Seconds = 2,
+                Announce(new Island.Act { Id = "pause", Text = "Paused", Dot = Island.Mark.Paused, Seconds = 2,
                     Balloon = "Paused: HDR and resolutions stay as they are until you resume (" + HotKey.Text + ")." });
             }
             else
             {
                 bool hdr = HdrRunning() && SwitchOn();
                 ReapplyProfiles();
-                Announce(new Island.Act { Id = "pause", Text = hdr ? "HDR on" : "Resumed", Dot = hdr ? Theme.Amber : Theme.Text1, Seconds = 2,
+                Announce(new Island.Act { Id = "pause", Text = hdr ? "HDR on" : "Resumed", Dot = hdr ? Island.Mark.Hdr : Island.Mark.On, Seconds = 2,
                     Balloon = "Resumed." });
             }
             UpdateTray();
@@ -3176,11 +3181,5 @@ namespace HdrSwitch
         [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
         [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
         [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr hdc);
-
-        // The glass (Glass.cs): the blur behind a window, and the window's shape.
-        [StructLayout(LayoutKind.Sequential)] public struct AccentPolicy { public int AccentState, AccentFlags, GradientColor, AnimationId; }
-        [StructLayout(LayoutKind.Sequential)] public struct CompositionData { public int Attribute; public IntPtr Data; public int Size; }
-        [DllImport("user32.dll")] public static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref CompositionData data);
-        [DllImport("user32.dll")] public static extern int SetWindowRgn(IntPtr hwnd, IntPtr hrgn, bool redraw);
     }
 }

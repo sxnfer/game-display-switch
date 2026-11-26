@@ -7,7 +7,8 @@
 // GDI text (TextRenderer, for ClearType) has no alpha: a translucent text colour comes out at full strength. So text is
 // drawn in the opaque colour the translucent one makes over what it sits on (Over), worked out once per surface.
 //
-// The island keeps its glass (Theme.cs, Glass.cs) for now; nothing here is used by it.
+// The island (Island.cs) is drawn in the same colours: the flyout's surface and stroke, its text, the accent for what
+// is on, amber for HDR.
 
 using System;
 using System.Drawing;
@@ -69,6 +70,17 @@ namespace HdrSwitch
             try { light = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "SystemUsesLightTheme", null); } catch { }
             try { accent = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Accent", "AccentPalette", null) as byte[]; } catch { }
             current = For(ModeFor(hc, light), ParseAccent(accent));
+        }
+
+        /// <summary>
+        /// The render harnesses' made-up Windows (--render-flyout, --render-island): "dark", "light" or "hc" (a contrast
+        /// theme like Windows' "Night sky"), with the default accent.
+        /// </summary>
+        internal static Palette Sample(string theme)
+        {
+            return theme == "hc"
+                ? HighContrastFrom(Color.Black, Color.White, Color.FromArgb(0x1A, 0xEB, 0xFF), Color.Black, Color.FromArgb(0x3F, 0xF2, 0x3F), Color.Black, Color.White)
+                : For(theme == "light" ? Kind.Light : Kind.Dark, DefaultAccent);
         }
 
         // ---- the pure parts (tested) ----
