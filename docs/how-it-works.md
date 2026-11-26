@@ -11,6 +11,8 @@
 
 Your game list lives in `%AppData%\HdrSwitch\games.txt` (one exe per line; a `-` in front means "never").
 
+**If something goes wrong.** An unexpected error doesn't close the app or leave HDR, a competitive resolution or NVIDIA scaling switched on: it is written to `%AppData%\HdrSwitch\error.log` (the newest 256 KB at most) and the app carries on. If the app has to close because of one anyway, it first puts the displays back, as **Exit** does. The text files in that folder are saved by writing a copy beside them (`games.txt.tmp`) and then swapping it in, so a crash or power cut mid-save never leaves an empty `games.txt` or `resolutions.txt`. A file you made read-only is left alone (the change still applies until the app restarts), and lines the app doesn't understand in `resolutions.txt` and `brightness.txt` – notes, a line with a typo – are kept where they are when it saves.
+
 ## Building it yourself
 
 

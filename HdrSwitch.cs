@@ -40,6 +40,17 @@ namespace HdrSwitch
         [STAThread]
         static void Main(string[] args)
         {
+            // An unexpected error mustn't end the app with HDR, a competitive resolution or NVIDIA scaling left switched on.
+            // On the UI thread (clicks, timers, painting – nearly everything) it is logged and the app carries on, with no
+            // crash dialog whose Quit would skip putting the displays back. On another thread .NET ends the process
+            // whatever a handler does, so that one is logged and the displays are put back first, as far as that gets.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) => Guard.Log("Unexpected error", e.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                Guard.Log("Unexpected error, closing", e.ExceptionObject as Exception);
+                TrayApp.LastChance();
+            };
             // --updated: started by the old version during an update – wait for it to exit instead of giving up.
             bool updated = args.Contains("--updated");
             if (args.Contains("--island-demo"))   // a preview of the island alone: before the mutex, so it runs beside an installed copy
@@ -161,6 +172,8 @@ namespace HdrSwitch
 
         public TrayApp(bool updated, bool open)   // --open: show the flyout right away (development, screenshots)
         {
+            current = this;
+            uiThread = Thread.CurrentThread;
             Directory.CreateDirectory(Dir);
             Updater.CleanUp();
             bool firstRun = !File.Exists(ListFile);
@@ -990,12 +1003,12 @@ namespace HdrSwitch
 
         static void WriteState(string text)
         {
-            try { File.WriteAllText(StateFile, text); } catch (IOException) { }
+            Guard.Save(StateFile, text);
         }
 
         void DeleteState()
         {
-            try { File.Delete(StateFile); } catch (IOException) { }
+            Guard.Delete(StateFile);
         }
 
         /// <summary>
@@ -1014,6 +1027,7 @@ namespace HdrSwitch
                 text = File.ReadAllText(StateFile);
             }
             catch (IOException) { return; }
+            catch (UnauthorizedAccessException) { return; }
             string[] f = text.Trim().Split('|');
             int w, h, hz, back = -1, areaW = 0, areaH = 0;
             if (f.Length < 4 || !int.TryParse(f[1], out w) || !int.TryParse(f[2], out h) || !int.TryParse(f[3], out hz)
@@ -1036,35 +1050,18 @@ namespace HdrSwitch
             string[] lines;
             try { lines = File.ReadAllLines(ProfilesFile); }
             catch (IOException) { return; }   // file busy (being saved) – the watcher fires again
+            catch (UnauthorizedAccessException e) { Guard.Log("Couldn't read " + ProfilesFile, e); return; }
 
             var newProfiles = new Dictionary<string, Resolution.Mode>();
             var newStretches = new Dictionary<string, Resolution.Mode>();
             var newLabels = new Dictionary<string, string>();
             foreach (string raw in lines)
             {
-                string line = raw, label = "";
-                int hash = line.IndexOf('#');
-                if (hash >= 0)
-                {
-                    label = line.Substring(hash + 1).Trim();
-                    line = line.Substring(0, hash);
-                }
-                var m = ProfileLine.Match(line.Trim());
-                if (!m.Success) continue;
-                string name = Proc.Normalize(m.Groups[1].Value);
-                if (name == null) continue;
-                var p = new Resolution.Mode
-                {
-                    Width = int.Parse(m.Groups[2].Value), Height = int.Parse(m.Groups[3].Value),
-                    Hz = m.Groups[4].Success ? int.Parse(m.Groups[4].Value) : 0
-                };
-                if (p.Width < 320 || p.Height < 200) continue;
+                string name, label;
+                Resolution.Mode p, own;
+                if (!ParseProfile(raw, out name, out p, out own, out label)) continue;
                 newProfiles[name] = p;
-                if (m.Groups[5].Success)
-                {
-                    var own = new Resolution.Mode { Width = int.Parse(m.Groups[5].Value), Height = int.Parse(m.Groups[6].Value) };
-                    if (own.Width >= 320 && own.Height >= 200) newStretches[name] = own;
-                }
+                if (own != null) newStretches[name] = own;
                 if (label.Length > 0) newLabels[name] = label;
             }
             foreach (var kv in newProfiles)   // a changed line gets its "doesn't exist" notice again
@@ -1080,6 +1077,40 @@ namespace HdrSwitch
             profileLabels = newLabels;
         }
 
+        /// <summary>
+        /// One line of resolutions.txt: the game, its competitive resolution, the stretched one (or null: none, or too small)
+        /// and the note after #. False for anything else – a note, a blank line, a typo.
+        /// </summary>
+        internal static bool ParseProfile(string raw, out string name, out Resolution.Mode mode, out Resolution.Mode own, out string label)
+        {
+            string line = raw;
+            name = null;
+            mode = own = null;
+            label = "";
+            int hash = line.IndexOf('#');
+            if (hash >= 0)
+            {
+                label = line.Substring(hash + 1).Trim();
+                line = line.Substring(0, hash);
+            }
+            var m = ProfileLine.Match(line.Trim());
+            if (!m.Success) return false;
+            name = Proc.Normalize(m.Groups[1].Value);
+            if (name == null) return false;
+            mode = new Resolution.Mode
+            {
+                Width = int.Parse(m.Groups[2].Value), Height = int.Parse(m.Groups[3].Value),
+                Hz = m.Groups[4].Success ? int.Parse(m.Groups[4].Value) : 0
+            };
+            if (mode.Width < 320 || mode.Height < 200) return false;
+            if (m.Groups[5].Success)
+            {
+                own = new Resolution.Mode { Width = int.Parse(m.Groups[5].Value), Height = int.Parse(m.Groups[6].Value) };
+                if (own.Width < 320 || own.Height < 200) own = null;
+            }
+            return true;
+        }
+
         // "cs2.exe  2368x1332", "cs2.exe 2368 × 1332 @ 240", "cs2.exe 2368x1332 stretch 1776x1332" (the note after # is already gone)
         internal static readonly Regex ProfileLine = new Regex(@"^(.+?)\s+(\d{3,5})\s*[x×]\s*(\d{3,5})(?:\s*@\s*(\d{2,4})(?:\s*hz)?)?"
             + @"(?:\s+stretch(?:ed)?\s*:?\s*(\d{3,5})\s*[x×]\s*(\d{3,5}))?$", RegexOptions.IgnoreCase);
@@ -1092,29 +1123,78 @@ namespace HdrSwitch
             resFailed.Remove(name + "/own");
         }
 
+        static readonly string[] ProfileHeader =
+        {
+            "# Display Switch - competitive resolutions. While one of these games runs, the screen switches to this",
+            "# resolution, shown 1:1 in the middle with black borders, and goes back when the game closes.",
+            "# One game per line: exe, resolution, optional @refresh rate (otherwise the current one). Text after # is a note.",
+            "# The resolution must be in Windows' list: create it in NVIDIA Control Panel > Change resolution > Customize.",
+            "# For a game in borderless (fullscreen windowed) mode, add  stretch 1776x1332  after the resolution: the game",
+            "# then runs at that lower resolution, stretched over the competitive one. It has to fit inside it.",
+            "# Easier: click the tray icon, then the monitor symbol next to a game. Changes apply as soon as you save.",
+            ""
+        };
+
         void SaveProfiles()
         {
-            var lines = new List<string>
+            string[] old;
+            if (!ReadForSave(ProfilesFile, out old)) return;
+            Guard.Save(ProfilesFile, ProfileFile(old, profiles, stretches, LabelOf));
+        }
+
+        /// <summary>
+        /// The lines of a file about to be saved again (null: there is none yet), so the save can keep what it doesn't
+        /// understand. False if it exists but can't be read: then it isn't saved, rather than saved without those lines.
+        /// </summary>
+        static bool ReadForSave(string path, out string[] lines)
+        {
+            lines = null;
+            try
             {
-                "# Display Switch - competitive resolutions. While one of these games runs, the screen switches to this",
-                "# resolution, shown 1:1 in the middle with black borders, and goes back when the game closes.",
-                "# One game per line: exe, resolution, optional @refresh rate (otherwise the current one). Text after # is a note.",
-                "# The resolution must be in Windows' list: create it in NVIDIA Control Panel > Change resolution > Customize.",
-                "# For a game in borderless (fullscreen windowed) mode, add  stretch 1776x1332  after the resolution: the game",
-                "# then runs at that lower resolution, stretched over the competitive one. It has to fit inside it.",
-                "# Easier: click the tray icon, then the monitor symbol next to a game. Changes apply as soon as you save.",
-                ""
-            };
-            lines.AddRange(profiles.Keys.OrderBy(LabelOf, StringComparer.OrdinalIgnoreCase).Select(g =>
+                if (File.Exists(path)) lines = File.ReadAllLines(path);
+                return true;
+            }
+            catch (IOException e) { Guard.Log("Not saved, couldn't read " + path + " first", e); }
+            catch (UnauthorizedAccessException e) { Guard.Log("Not saved, couldn't read " + path + " first", e); }
+            return false;
+        }
+
+        /// <summary>
+        /// resolutions.txt as it is to be saved, from the lines it has now (null: a new file, which gets the header). A game's
+        /// line whose resolution didn't change stays exactly as written; a changed one is rewritten in its place; a removed
+        /// one goes, as does a second line for the same game. Games that have no line yet are added at the end. Every line
+        /// that isn't a resolution – notes, blank lines, a line with a typo – stays where it is, word for word.
+        /// </summary>
+        internal static List<string> ProfileFile(IList<string> old, IDictionary<string, Resolution.Mode> profiles,
+            IDictionary<string, Resolution.Mode> stretches, Func<string, string> labelOf)
+        {
+            var lines = new List<string>();
+            var done = new HashSet<string>();
+            foreach (string raw in old ?? ProfileHeader)
+            {
+                string name, label;
+                Resolution.Mode mode, own, want, wantOwn;
+                if (!ParseProfile(raw, out name, out mode, out own, out label)) { lines.Add(raw); continue; }
+                if (!profiles.TryGetValue(name, out want) || !done.Add(name)) continue;
+                stretches.TryGetValue(name, out wantOwn);
+                bool same = mode.Same(want) && (own == null ? wantOwn == null : own.Same(wantOwn));
+                lines.Add(same ? raw : FormatProfile(name, want, wantOwn, labelOf(name)));
+            }
+            lines.AddRange(profiles.Keys.Where(g => !done.Contains(g)).OrderBy(labelOf, StringComparer.OrdinalIgnoreCase).Select(g =>
             {
                 Resolution.Mode own;
                 stretches.TryGetValue(g, out own);
-                string line = (g + ".exe").PadRight(35) + " " + (profiles[g].Width + "x" + profiles[g].Height + (profiles[g].Hz > 0 ? "@" + profiles[g].Hz : "")).PadRight(16)
-                    + (own == null ? "" : " " + ("stretch " + own.Width + "x" + own.Height).PadRight(18));
-                string l = LabelOf(g);
-                return l == g ? line.TrimEnd() : line + " # " + l;
+                return FormatProfile(g, profiles[g], own, labelOf(g));
             }));
-            try { File.WriteAllLines(ProfilesFile, lines, Encoding.UTF8); } catch (IOException) { }
+            return lines;
+        }
+
+        /// <summary>"cs2.exe   2368x1332@240   stretch 1776x1332   # Counter-Strike 2" (no note if it would only repeat the name).</summary>
+        static string FormatProfile(string g, Resolution.Mode p, Resolution.Mode own, string label)
+        {
+            string line = (g + ".exe").PadRight(35) + " " + (p.Width + "x" + p.Height + (p.Hz > 0 ? "@" + p.Hz : "")).PadRight(16)
+                + (own == null ? "" : " " + ("stretch " + own.Width + "x" + own.Height).PadRight(18));
+            return label == g ? line.TrimEnd() : line + " # " + label;
         }
 
         /// <summary>From the flyout: this game's resolution (null: off). Saved, and applied right away if the game runs.</summary>
@@ -1192,12 +1272,12 @@ namespace HdrSwitch
             if (d != null && Hdr.SdrWhite(d) == brightSet) Hdr.SetSdrWhite(d, brightBack);
             brightBack = brightSet = -1;
             brightKey = null;
-            try { File.Delete(BrightStateFile); } catch (IOException) { }
+            Guard.Delete(BrightStateFile);
         }
 
         void WriteBrightState()
         {
-            try { File.WriteAllText(BrightStateFile, brightKey + "|" + brightBack + "|" + brightSet); } catch (IOException) { }
+            Guard.Save(BrightStateFile, brightKey + "|" + brightBack + "|" + brightSet);
         }
 
         /// <summary>A previous run ended while a game had its level: take it over, so the next sync puts it back.</summary>
@@ -1215,9 +1295,10 @@ namespace HdrSwitch
                     brightSet = set;
                     RestoreBrightness();   // a game that still runs gets its level again with the first sync
                 }
-                else File.Delete(BrightStateFile);
+                else Guard.Delete(BrightStateFile);
             }
             catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
 
         void LoadBrightness()
@@ -1226,6 +1307,7 @@ namespace HdrSwitch
             string[] lines;
             try { lines = File.ReadAllLines(BrightnessFile); }
             catch (IOException) { return; }   // file busy (being saved) – the watcher fires again
+            catch (UnauthorizedAccessException e) { Guard.Log("Couldn't read " + BrightnessFile, e); return; }
             brightness = ParseBrightness(lines);
         }
 
@@ -1235,37 +1317,71 @@ namespace HdrSwitch
             var all = new Dictionary<string, int>();
             foreach (string raw in lines)
             {
-                string line = raw;
-                int hash = line.IndexOf('#');
-                if (hash >= 0) line = line.Substring(0, hash);
-                var m = BrightnessLine.Match(line.Trim());
-                if (!m.Success) continue;
-                string name = Proc.Normalize(m.Groups[1].Value);
-                int p = int.Parse(m.Groups[2].Value);
-                if (name != null && p <= 100) all[name] = p;
+                string name;
+                int p;
+                if (ParseBrightness(raw, out name, out p)) all[name] = p;
             }
             return all;
         }
 
+        /// <summary>One line of brightness.txt. False for anything else – a note, a blank line, a level above 100.</summary>
+        internal static bool ParseBrightness(string raw, out string name, out int percent)
+        {
+            string line = raw;
+            name = null;
+            percent = -1;
+            int hash = line.IndexOf('#');
+            if (hash >= 0) line = line.Substring(0, hash);
+            var m = BrightnessLine.Match(line.Trim());
+            if (!m.Success) return false;
+            name = Proc.Normalize(m.Groups[1].Value);
+            percent = int.Parse(m.Groups[2].Value);
+            return name != null && percent <= 100;
+        }
+
         static readonly Regex BrightnessLine = new Regex(@"^(.+?)\s+(\d{1,3})\s*%?$");
+
+        static readonly string[] BrightnessHeader =
+        {
+            "# Display Switch - SDR content brightness per game: Windows' slider of that name (0-100), set while the game",
+            "# runs with HDR on and put back when it closes. It decides how bright the desktop, SDR games and a game's",
+            "# SDR menus look in HDR. One game per line: exe and level. Text after # is a note. Easier: the flyout's",
+            "# monitor symbol next to a game, then SDR brightness.",
+            ""
+        };
 
         void SaveBrightness()
         {
-            var lines = new List<string>
+            string[] old;
+            if (!ReadForSave(BrightnessFile, out old)) return;
+            Guard.Save(BrightnessFile, BrightnessFileLines(old, brightness, LabelOf));
+        }
+
+        /// <summary>
+        /// brightness.txt as it is to be saved, kept the same way as resolutions.txt (see ProfileFile): unchanged levels
+        /// as written, changed ones rewritten in place, removed ones gone, new ones at the end, everything else untouched.
+        /// </summary>
+        internal static List<string> BrightnessFileLines(IList<string> old, IDictionary<string, int> levels, Func<string, string> labelOf)
+        {
+            var lines = new List<string>();
+            var done = new HashSet<string>();
+            foreach (string raw in old ?? BrightnessHeader)
             {
-                "# Display Switch - SDR content brightness per game: Windows' slider of that name (0-100), set while the game",
-                "# runs with HDR on and put back when it closes. It decides how bright the desktop, SDR games and a game's",
-                "# SDR menus look in HDR. One game per line: exe and level. Text after # is a note. Easier: the flyout's",
-                "# monitor symbol next to a game, then SDR brightness.",
-                ""
-            };
-            lines.AddRange(brightness.Keys.OrderBy(LabelOf, StringComparer.OrdinalIgnoreCase).Select(g =>
-            {
-                string line = (g + ".exe").PadRight(35) + " " + brightness[g];
-                string l = LabelOf(g);
-                return l == g ? line : line.PadRight(41) + " # " + l;
-            }));
-            try { File.WriteAllLines(BrightnessFile, lines, Encoding.UTF8); } catch (IOException) { }
+                string name;
+                int p, want;
+                if (!ParseBrightness(raw, out name, out p)) { lines.Add(raw); continue; }
+                if (!levels.TryGetValue(name, out want) || !done.Add(name)) continue;
+                lines.Add(p == want ? raw : FormatBrightness(name, want, labelOf(name)));
+            }
+            lines.AddRange(levels.Keys.Where(g => !done.Contains(g)).OrderBy(labelOf, StringComparer.OrdinalIgnoreCase)
+                .Select(g => FormatBrightness(g, levels[g], labelOf(g))));
+            return lines;
+        }
+
+        static string FormatBrightness(string g, int percent, string label)
+        {
+            string line = (g + ".exe").PadRight(35) + " " + percent;
+            return label == g ? line : line.PadRight(41) + " # " + label;
         }
 
         /// <summary>From the flyout: this game's level (-1: Windows' own). Saved, and applied right away if the game runs.</summary>
@@ -1291,11 +1407,12 @@ namespace HdrSwitch
                     "# For example:  recorder.exe  # My recorder",
                     ""
                 };
-                try { File.WriteAllLines(RecordersFile, lines, Encoding.UTF8); } catch (IOException) { }
+                Guard.Save(RecordersFile, lines);
             }
             string[] text;
             try { text = File.ReadAllLines(RecordersFile); }
             catch (IOException) { return; }   // file busy (being saved) – the watcher fires again
+            catch (UnauthorizedAccessException e) { Guard.Log("Couldn't read " + RecordersFile, e); return; }
             recorders = ParseRecorders(text);
             if (sdrWhileRecording && recorder != null && !recorders.ContainsKey(recorder)) SetRecorder(null);   // taken off the list
         }
@@ -1327,6 +1444,7 @@ namespace HdrSwitch
             string[] lines;
             try { lines = File.ReadAllLines(ListFile); }
             catch (IOException) { return; }   // file busy (being saved) – the watcher fires again
+            catch (UnauthorizedAccessException e) { Guard.Log("Couldn't read " + ListFile, e); return; }
 
             var newGames = new HashSet<string>();
             var newExcluded = new HashSet<string>();
@@ -1371,7 +1489,7 @@ namespace HdrSwitch
                 lines.Add("# Never switch HDR for these:");
                 lines.AddRange(excluded.OrderBy(LabelOf, StringComparer.OrdinalIgnoreCase).Select(g => ListLine(g, true)));
             }
-            try { File.WriteAllLines(ListFile, lines, Encoding.UTF8); } catch (IOException) { }
+            Guard.Save(ListFile, lines);
         }
 
         string LabelOf(string name)
@@ -1512,17 +1630,31 @@ namespace HdrSwitch
 
         static bool IsStartup()
         {
-            using (var k = Registry.CurrentUser.OpenSubKey(RunKey))
-                return k != null && k.GetValue(RunValue) != null;
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(RunKey))
+                    return k != null && k.GetValue(RunValue) != null;
+            }
+            catch (System.Security.SecurityException e) { Guard.Log("Couldn't read Start with Windows", e); }
+            catch (UnauthorizedAccessException e) { Guard.Log("Couldn't read Start with Windows", e); }
+            catch (IOException e) { Guard.Log("Couldn't read Start with Windows", e); }
+            return false;
         }
 
+        /// <summary>Start with Windows on or off. A Run key that can't be changed (a policy, security software) is logged and left as it is.</summary>
         static void SetStartup(bool on)
         {
-            using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
+            try
             {
-                if (on) k.SetValue(RunValue, "\"" + Application.ExecutablePath + "\"");
-                else k.DeleteValue(RunValue, false);
+                using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
+                {
+                    if (on) k.SetValue(RunValue, "\"" + Application.ExecutablePath + "\"");
+                    else k.DeleteValue(RunValue, false);
+                }
             }
+            catch (System.Security.SecurityException e) { Guard.Log("Couldn't change Start with Windows", e); }
+            catch (UnauthorizedAccessException e) { Guard.Log("Couldn't change Start with Windows", e); }
+            catch (IOException e) { Guard.Log("Couldn't change Start with Windows", e); }
         }
 
         /// <summary>
@@ -1551,6 +1683,44 @@ namespace HdrSwitch
         static void Trim()
         {
             Native.SetProcessWorkingSetSize(Native.GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1));
+        }
+
+        static TrayApp current;   // for LastChance
+        Thread uiThread;
+        static int dying, puttingBack;
+
+        /// <summary>
+        /// The process is about to end of an error on another thread: put back what this app switched, as Exit would –
+        /// on the UI thread if it answers within 3 s, otherwise from here. Runs once; never throws.
+        /// </summary>
+        internal static void LastChance()
+        {
+            var app = current;
+            if (app == null || Interlocked.Exchange(ref dying, 1) != 0) return;
+            try
+            {
+                if (Thread.CurrentThread == app.uiThread) { app.PutBack(); return; }
+                var done = new ManualResetEvent(false);   // not disposed: a late answer from the UI thread may still set it
+                app.ui.Post(_ => { try { app.PutBack(); } finally { done.Set(); } }, null);
+                if (!done.WaitOne(3000)) app.PutBack();   // the UI thread is stuck: from this thread then
+            }
+            catch (Exception e) { Guard.Log("Putting the displays back", e); }
+        }
+
+        /// <summary>
+        /// Everything this app switched goes back, whatever is still running: the mode, NVIDIA scaling, SDR brightness, HDR.
+        /// Only the displays – nothing on screen is touched, so it can run from any thread. Each step on its own, so one that
+        /// fails doesn't stop the rest; once only.
+        /// </summary>
+        void PutBack()
+        {
+            if (Interlocked.Exchange(ref puttingBack, 1) != 0) return;
+            Action[] steps = { RevertResolution, RestoreStrayScaling, RestoreBrightness, () => { foreach (var d in owned) Hdr.Set(d, false); owned.Clear(); } };
+            foreach (var step in steps)
+            {
+                try { step(); }
+                catch (Exception e) { Guard.Log("Putting the displays back", e); }
+            }
         }
 
         protected override void ExitThreadCore()
