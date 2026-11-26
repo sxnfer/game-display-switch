@@ -1,6 +1,5 @@
 // What the island, the flyout and the tray icon share: fonts, corner shapes, colour arithmetic, the spinner, and the
-// island's colours. The island is liquid glass (Glass.cs) with white on it at a few strengths. The flyout is a solid
-// Windows 11 flyout with its own colours (Palette.cs). Amber means HDR everywhere (red only marks a recording app).
+// tray icon's colours. The island and the flyout take theirs from Windows (Palette.cs). Amber means HDR everywhere.
 
 using System;
 using System.Collections.Generic;
@@ -13,14 +12,9 @@ namespace HdrSwitch
 {
     static class Theme
     {
-        // The island sits on glass (Glass.cs): its text is white at two strengths and takes nothing from Windows' mode.
-        public static readonly Color Veil = Color.FromArgb(72, 18, 18, 24);      // the glass itself: just enough for white text on a bright desktop
-        public static readonly Color Solid = Color.FromArgb(255, 30, 30, 34);    // the glass with "Transparency effects" off
-        public static readonly Color Text1 = Color.White;
-        public static readonly Color Text2 = Color.FromArgb(196, 255, 255, 255);
-        public static readonly Color Amber = Color.FromArgb(255, 170, 0);    // HDR on: the island's dot and the tray icon
-        public static readonly Color Grey = Color.FromArgb(142, 142, 147);   // SDR
-        public static readonly Color Rec = Color.FromArgb(255, 69, 58);      // a recording app
+        // The tray icon: amber while HDR is on, grey in SDR.
+        public static readonly Color Amber = Color.FromArgb(255, 170, 0);
+        public static readonly Color Grey = Color.FromArgb(142, 142, 147);
 
         public static readonly bool Win11 = Environment.OSVersion.Version.Build >= 22000;
         public static readonly string TextFamily, StrongFamily, DisplayFamily, IconFamily;

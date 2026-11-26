@@ -5,7 +5,7 @@
 //
 // This class only does the motion: where each character is, how visible, how far it is smeared along its way, and how
 // wide the whole text is right now (a pill around it can follow that). The drawing is the caller's, because the flyout
-// draws GDI text on an opaque card and the island GDI+ text on a transparent surface. Neither has a cheap blur, so the
+// draws GDI text on an opaque card and the island GDI+ text (it has per-character alpha) on a layered window. Neither has a cheap blur, so the
 // motion blur is a second, fainter copy that trails a moving character.
 //
 // With Windows' "Animation effects" off it simply shows the new text (the springs snap, see Spring.To).

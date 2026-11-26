@@ -1962,9 +1962,7 @@ namespace HdrSwitch
                 return i >= 0 && i + 1 < args.Length ? args[i + 1] : unset;
             };
             string path = arg("--render-flyout", "flyout.png"), theme = arg("--theme", "dark");
-            Palette.Current = theme == "hc"
-                ? Palette.HighContrastFrom(Color.Black, Color.White, Color.FromArgb(0x1A, 0xEB, 0xFF), Color.Black, Color.FromArgb(0x3F, 0xF2, 0x3F), Color.Black, Color.White)   // like Windows' "Night sky"
-                : Palette.For(theme == "light" ? Palette.Kind.Light : Palette.Kind.Dark, Palette.DefaultAccent);
+            Palette.Current = Palette.Sample(theme);
             float scale;
             if (!float.TryParse(arg("--scale", "1"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scale) || scale <= 0) scale = 1;
 
