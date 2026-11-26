@@ -86,6 +86,13 @@ namespace HdrSwitch
             bool stretching;  // choosing: the list shows the game's own resolutions, to stretch over its competitive one
             bool brightening; // choosing: the list shows the SDR brightness levels for the game
             readonly FlyoutTrail trail = new FlyoutTrail();   // where each open view was entered from: back returns there
+            FlyoutTab tab = FlyoutTab.Live;       // the page it shows: Live, Games or Settings
+            FlyoutTab lastTab = FlyoutTab.Live;   // the one last chosen while the app runs: it opens there when nothing is going on
+            readonly Dictionary<FlyoutTab, double> tabScroll = new Dictionary<FlyoutTab, double>();   // each tab's place, while it is open
+            string cardView;      // the view the status block's height belongs to
+            int belowFrom;        // the first item below the status block: it moves with the block's height
+            // While the wait before switching back counts down, Live's status line rolls with it.
+            readonly System.Windows.Forms.Timer clock = new System.Windows.Forms.Timer { Interval = 250 };
             bool entered;         // a view was just entered: the keyboard starts on its first row
             bool returned;        // just back from a view: the keyboard is on the control that opened it
             bool repeat;          // the key being handled is held down (auto-repeat): it moves, but never presses
@@ -123,6 +130,13 @@ namespace HdrSwitch
 
                 tick = Tick;
                 thumbRest.Tick += (s, e) => { thumbRest.Stop(); thumb.To(0); Motion.Run(tick); };
+                clock.Tick += (s, e) =>
+                {
+                    if (!Visible || closing || tab != FlyoutTab.Live || Depth() > 0 || !app.sdrTimer.Enabled) return;
+                    string t, u;
+                    LiveStatus(Snapshot(), out t, out u);
+                    if (t != shownTitle || u != shownSub) Do(Rebuild);
+                };
                 prefs = (s, e) =>
                 {
                     if (e.Category == UserPreferenceCategory.Color || e.Category == UserPreferenceCategory.General || e.Category == UserPreferenceCategory.Accessibility)
@@ -180,8 +194,12 @@ namespace HdrSwitch
                 stretching = false;
                 brightening = false;
                 trail.Clear();
+                tabScroll.Clear();
                 entered = returned = false;
                 wheel = 0;
+                // Live while a game runs or something is held; otherwise the tab used last.
+                bool held = app.paused || app.sdrTimer.Enabled || app.recorder != null;
+                tab = OpeningTab(app.running.Count > 0, held, lastTab);
                 Motion.Refresh();
                 Palette.Load();
                 BackColor = P.Surface;
@@ -209,6 +227,7 @@ namespace HdrSwitch
                 open.To(1);
                 Place();
                 if (!wasVisible) Show();
+                clock.Start();
                 Invalidate();
                 Update();
                 Activate();
@@ -238,6 +257,7 @@ namespace HdrSwitch
                 hover = pressed = -1;
                 foreach (var a in anims.Values) { a.Hover.Snap(0); a.Press.Snap(0); }
                 thumbRest.Stop();
+                clock.Stop();
                 Trim();
             }
 
@@ -354,8 +374,16 @@ namespace HdrSwitch
                         if (repeat) return true;
                         if (Depth() > 0) Do(GoBack); else Dismiss(false);
                         return true;
-                    case Keys.Tab: case Keys.Down: case Keys.Right: MoveFocus(1); return true;
-                    case Keys.Shift | Keys.Tab: case Keys.Up: case Keys.Left: MoveFocus(-1); return true;
+                    case Keys.Tab: case Keys.Down: MoveFocus(1); return true;
+                    case Keys.Shift | Keys.Tab: case Keys.Up: MoveFocus(-1); return true;
+                    // On a tab, the arrows switch tabs (and the focus goes along); elsewhere they move like Tab.
+                    case Keys.Right: case Keys.Left:
+                        int dir = keyData == Keys.Right ? 1 : -1;
+                        if (OnTab()) Do(() => SwitchTab(NextTab(tab, dir), true)); else MoveFocus(dir);
+                        return true;
+                    // Ctrl+Tab and Ctrl+Page Down: the next tab, from anywhere in it; with Shift, or Page Up, the one before.
+                    case Keys.Control | Keys.Tab: case Keys.Control | Keys.PageDown: Do(() => SwitchTab(NextTab(tab, 1), true)); return true;
+                    case Keys.Control | Keys.Shift | Keys.Tab: case Keys.Control | Keys.PageUp: Do(() => SwitchTab(NextTab(tab, -1), true)); return true;
                     case Keys.Home: MoveFocus(0); return true;
                     case Keys.Enter: Press(); return true;
                     case Keys.Back:
@@ -581,7 +609,7 @@ namespace HdrSwitch
 
                 public override string DefaultAction
                 {
-                    get { var item = Now; return item == null || item.Click == null ? null : item.Role == AccessibleRole.CheckButton ? "Toggle" : "Press"; }
+                    get { var item = Now; return item == null || item.Click == null ? null : item.Role == AccessibleRole.CheckButton ? "Toggle" : item.Role == AccessibleRole.PageTab ? "Switch" : "Press"; }
                 }
 
                 public override void DoDefaultAction()
@@ -595,6 +623,12 @@ namespace HdrSwitch
                 {
                     int i = Index;
                     if (i >= 0 && (flags & AccessibleSelection.TakeFocus) != 0) f.SetFocus(i);
+                    var item = Now;   // a tab selected by a screen reader: shown
+                    if (item != null && item.Role == AccessibleRole.PageTab && (flags & AccessibleSelection.TakeSelection) != 0 && item.Click != null)
+                    {
+                        var click = item.Click;
+                        f.BeginInvoke((Action)(() => f.Do(click)));
+                    }
                 }
             }
 
@@ -603,7 +637,8 @@ namespace HdrSwitch
             {
                 var st = AccessibleStates.None;
                 if (it.Click == null && it.Role != AccessibleRole.StaticText) st |= AccessibleStates.Unavailable;   // the update button while busy
-                if (it.Selected) st |= AccessibleStates.Checked;
+                if (it.Role == AccessibleRole.PageTab) st |= AccessibleStates.Selectable | (it.Selected ? AccessibleStates.Selected : AccessibleStates.None);
+                else if (it.Selected) st |= AccessibleStates.Checked;
                 if (it.Busy) st |= AccessibleStates.Busy;
                 return st;
             }
@@ -633,6 +668,7 @@ namespace HdrSwitch
                 {
                     SystemEvents.UserPreferenceChanged -= prefs;   // a static event: it would keep this alive
                     thumbRest.Dispose();
+                    clock.Dispose();
                     tip.Dispose();
                     if (fonts != null) fonts.Dispose();
                 }
@@ -655,96 +691,436 @@ namespace HdrSwitch
                 foreach (var it in items) if (it.Key != null) before[it.Key] = it;
                 items.Clear();
                 foreach (var r in rolls.Values) r.Seen = false;
-                int W = S(372), M = S(12), G = S(8), CP = S(12), cw = W - 2 * M;
-                int y = M;
+                if (Depth() > 0) tab = FlyoutTab.Games;   // the games' own views live under their tab
+                int W = S(372), M = S(12);
+                int y = TopBar(W, M);
+                card = new Rectangle(M, y, W - 2 * M, 0);   // only Live has a status block that grows
+                belowFrom = items.Count;
+                if (tab == FlyoutTab.Live) y = BuildLive(W, M, y);
+                else if (tab == FlyoutTab.Settings) y = BuildSettings(W, M, y);
+                else y = BuildGames(W, M, y);
 
-                // Status card: what is going on, and HDR's marker on the right. Below that the latest setup hint, and the
-                // update button when there is one.
-                string title, sub;
-                bool on;
-                Status(out title, out sub, out on);
-                bool hasUpdate = app.update != null;
-                string notice = app.notice, error = hasUpdate ? app.UpdateNote : null;   // why it failed, or what it waits for
-                int textW = cw - 2 * CP;
-                int noticeH = notice == null ? 0 : TextRenderer.MeasureText(notice, fonts.Caption, new Size(textW, 2000), TfWrap).Height;
-                int errorH = error == null ? 0 : TextRenderer.MeasureText(error, fonts.Caption, new Size(textW, 2000), TfWrap).Height;
-                int topH = S(28) + S(16);   // Subtitle 20/28 and Caption 12/16
-                int noticeY = CP + topH + S(8);
-                int updateY = CP + topH + (notice != null ? S(8) + noticeH : 0) + S(12);
-                int h1 = (hasUpdate ? updateY + S(32) + (error != null ? S(8) + errorH : 0) : updateY - S(12)) + CP;
-                var c1 = new Rectangle(M, y, cw, h1);
-                RollText titleRoll = Roll("title", title, fonts.Title), subRoll = Roll("sub", sub, fonts.Caption);
-                int markW = Math.Max(TextRenderer.MeasureText(MarkOn, fonts.Label, Size.Empty, TfLeft).Width, TextRenderer.MeasureText(MarkOff, fonts.Label, Size.Empty, TfLeft).Width) + S(6) + S(5) + S(6) + S(8);
-                items.Add(new Item { Rect = c1, Key = "status", On = on, InCard = true, Grows = true, Role = AccessibleRole.StaticText,
-                    Name = title + ". " + sub + (notice != null ? ". " + notice : "") + (error != null ? ". " + error : ""), Paint = (g, rc, lk) =>
+                for (int i = belowFrom; i < items.Count; i++) items[i].Below = true;
+                contentH = y;
+                string view = tab + ":" + Depth();   // another view starts at its own height: nothing to grow from
+                if (Visible && !closing && view == cardView) cardH.To(card.Height);
+                else cardH.Snap(card.Height);
+                cardView = view;
+
+                // The springs follow the new items: kept by key, new ones start where they belong, old ones go.
+                foreach (var a in anims.Values) a.Seen = false;
+                foreach (var it in items)
                 {
-                    CardBox(g, rc);
-                    Color bg = P.CardSolid;
-                    int tx = rc.X + CP, tw = rc.Right - CP - markW - S(8) - tx;
-                    DrawRoll(g, titleRoll, fonts.Title, P.Ink(P.Text1, bg), bg, new Rectangle(tx, rc.Y + CP, tw, S(28)), -1);
-                    DrawRoll(g, subRoll, fonts.Caption, P.Ink(P.Text2, bg), bg, new Rectangle(tx, rc.Y + CP + S(28), textW, S(16)), -1);
-                    HdrMark(g, new Rectangle(rc.Right - CP - markW, rc.Y + CP + S(4), markW, S(20)), lk.On, bg);
-                    if (notice != null) Draw(g, notice, fonts.Caption, P.Ink(P.Text2, bg), new Rectangle(rc.X + CP, rc.Y + noticeY, textW, noticeH), TfWrap);
-                    if (error != null) Draw(g, error, fonts.Caption, P.Ink(P.Text2, bg), new Rectangle(rc.X + CP, rc.Y + updateY + S(32) + S(8), textW, errorH), TfWrap);
-                } });
-                if (hasUpdate)
-                {
-                    // An accent (primary) button, full-width while it waits for a click. Once clicked it turns into a
-                    // standard button and shrinks around a spinner, its label rolling through the steps of the update; a
-                    // failure says so with a nudge, then it opens up again with the reason underneath. Held back by a game
-                    // it keeps its label, without the spinner.
-                    bool busy = app.updating, failed = app.updateStep == UpdateFailed, waits = app.updateStep == UpdateWaits;
-                    string label = busy ? app.updateStep ?? "Downloading" : "Update to " + app.update.VersionText;
-                    var ur = new Rectangle(c1.X + CP, c1.Y + updateY, c1.Width - 2 * CP, S(32));
-                    RollText roll = Roll("update", label, fonts.Strong);
-                    int spin = S(16), gap = S(8);
-                    float fit = !busy ? ur.Width : (failed || waits ? S(18) : S(12) + spin + gap) + roll.TargetWidth + S(18);
-                    items.Add(new Item
+                    if (it.Key == null) continue;
+                    Anim a;
+                    bool fresh = !anims.TryGetValue(it.Key, out a);
+                    if (fresh) anims[it.Key] = a = new Anim();
+                    a.Seen = true;
+                    if (Visible && !fresh)
                     {
-                        Name = label, Rect = ur, Key = "update", On = busy, Busy = busy && !failed && !waits, Width = Math.Min(ur.Width, fit), Shake = failed, InCard = true, Listed = true,
-                        Click = busy ? null : (Action)(() => { app.InstallUpdate(); Rebuild(); }),
+                        a.On.To(it.On ? 1 : 0);
+                        a.Busy.To(it.Busy ? 1 : 0);
+                        a.Width.To(it.Width);
+                        if (it.Shake && !a.Shaken && !Motion.Reduced) a.Shake.Velocity = 520 * k;   // the Shape spring brings it back with a wobble
+                    }
+                    else
+                    {
+                        a.On.Snap(it.On ? 1 : 0);
+                        a.Busy.Snap(it.Busy ? 1 : 0);
+                        a.Width.Snap(it.Width);
+                    }
+                    a.Shaken = it.Shake;
+                }
+                foreach (string gone in anims.Where(kv => !kv.Value.Seen).Select(kv => kv.Key).ToList()) anims.Remove(gone);
+                foreach (string gone in rolls.Where(kv => !kv.Value.Seen).Select(kv => kv.Key).ToList()) rolls.Remove(gone);
+
+                ClientSize = new Size(W, contentH + Grow);
+                pressed = -1;
+                focus = focusKey == null ? -1 : items.FindIndex(it => it.Key == focusKey);
+                if (!Focusable(focus)) focus = -1;
+                bool into = entered, outOf = returned;
+                entered = returned = false;
+                int firstRow = items.FindIndex(it => it.Scrolls && it.Click != null);
+                if (into && keyboard && firstRow >= 0) SetFocus(firstRow);       // a view opened: the keyboard starts on its first row
+                else if (outOf && keyboard && focus >= 0) SetFocus(focus);        // back: on the control that opened it, scrolled into view
+                else if (focus < 0 && focusKey != null && keyboard) MoveFocus(0);   // its control went: start at the top
+                Tell(before);
+                if (Visible)
+                {
+                    final = Corner(out slide);
+                    Place();
+                    hover = HitTest(PointToClient(Cursor.Position));
+                    tip.SetToolTip(this, hover >= 0 ? items[hover].Tip : null);
+                }
+                else hover = -1;
+                Aim();
+            }
+
+            // ---- the tabs ----
+
+            static string TabKey(FlyoutTab t) { return "tab:" + t.ToString().ToLowerInvariant(); }
+
+            /// <summary>
+            /// To another tab (a click, Ctrl+Tab, an arrow on a tab). A games view that is open closes; each tab keeps
+            /// where it was scrolled while the flyout stays open. focusTab: the keyboard moved, so the focus goes to it.
+            /// </summary>
+            void SwitchTab(FlyoutTab t, bool focusTab)
+            {
+                if (Depth() == 0) tabScroll[tab] = scrollTo.Target;
+                picking = false;
+                choosing = null;
+                stretching = brightening = false;
+                trail.Clear();
+                entered = returned = false;
+                wheel = 0;
+                tab = lastTab = t;
+                double at;
+                scrollTo.Snap(tabScroll.TryGetValue(t, out at) ? at : 0);   // Rebuild keeps it within the new list
+                scroll = (int)Math.Round(scrollTo.Value);
+                if (focusTab || keyboard) focusKey = TabKey(t);
+                Rebuild();
+                if (focusTab)
+                {
+                    int i = items.FindIndex(it => it.Key == focusKey);
+                    if (i >= 0) SetFocus(i);
+                }
+            }
+
+            /// <summary>The keyboard is on one of the tabs.</summary>
+            bool OnTab() { return Focusable(focus) && items[focus].Role == AccessibleRole.PageTab; }
+
+            /// <summary>
+            /// The top row: the three tabs (WinUI's SelectorBar: text, the chosen one semibold over a 16 × 3 accent pill)
+            /// and the tab's own buttons on the right – or, in one of the games' views, its back button and title.
+            /// Returns where the content below it starts.
+            /// </summary>
+            int TopBar(int W, int M)
+            {
+                Color sbg = P.Surface;
+                if (Depth() > 0)
+                {
+                    var back = new Rectangle(M - S(4), S(8), S(32), S(32));
+                    items.Add(new Item { Rect = back, Key = "back", Name = "Back", Click = GoBack,
+                        Paint = (g, rc, lk) => SubtleButton(g, rc, lk, "", fonts.GlyphSmall, P.Ink(P.Text1, sbg), sbg) });
+                    Resolution.Mode chosen;
+                    app.profiles.TryGetValue(choosing ?? "", out chosen);
+                    string head = picking ? "Add a program" : app.DisplayName(choosing);
+                    string headRight = picking ? "" : brightening ? "SDR brightness" : stretching && chosen != null ? "inside " + chosen.Text : "at " + HzFor(choosing) + " Hz";
+                    int rightW = headRight.Length == 0 ? 0 : TextRenderer.MeasureText(headRight, fonts.Caption, Size.Empty, TfLeft).Width + S(8);
+                    int hx = back.Right + S(8);
+                    items.Add(new Item { Rect = new Rectangle(hx, back.Y, W - M - hx, back.Height), Role = AccessibleRole.StaticText, Name = head + (headRight.Length > 0 ? ", " + headRight : ""), Paint = (g, rc, lk) =>
+                    {
+                        Draw(g, head, fonts.Strong, P.Ink(P.Text1, sbg), new Rectangle(rc.X, rc.Y, rc.Width - rightW, rc.Height), TfLeft);
+                        Draw(g, headRight, fonts.Caption, P.Ink(P.Text2, sbg), new Rectangle(rc.Right - rightW, rc.Y, rightW, rc.Height), TfLeft | TextFormatFlags.Right);
+                    } });
+                    return S(48);
+                }
+                int x = M;
+                foreach (var t in FlyoutTabs)
+                {
+                    var tt = t;
+                    string name = t.ToString();
+                    bool sel = t == tab;
+                    int w = TextRenderer.MeasureText(name, fonts.Strong, Size.Empty, TfLeft).Width + S(20);   // sized for semibold: it doesn't move when chosen
+                    var r = new Rectangle(x, S(6), w, S(36));
+                    x += w + S(2);
+                    items.Add(new Item { Rect = r, Key = TabKey(t), Name = name, Role = AccessibleRole.PageTab, Selected = sel, On = sel,
+                        Click = () => SwitchTab(tt, false), Paint = (g, rc, lk) =>
+                    {
+                        if (lk.Hover > 0.01)
+                        {
+                            if (P.HighContrast) { if (lk.Hover > 0.5) Outline(g, rc, S(4), P.HoverStroke); }
+                            else Theme.Fill(g, rc, S(4), Theme.Fade(Theme.Mix(P.SubtleHover, P.SubtlePress, lk.Press), lk.Hover));
+                        }
+                        Color fg = sel ? P.Ink(P.Text1, sbg) : Theme.Mix(P.Ink(P.Text2, sbg), P.Ink(P.Text1, sbg), lk.Hover * 0.6);
+                        Draw(g, name, sel ? fonts.Strong : fonts.Body, fg, new Rectangle(rc.X, rc.Y + S(6), rc.Width, S(20)), TfCenter);
+                        if (lk.On > 0.01)   // the pill grows in from the middle as a tab is chosen
+                        {
+                            float pw = S(16) * (float)Math.Min(1, lk.On);
+                            Theme.Fill(g, new RectangleF(rc.X + (rc.Width - pw) / 2f, rc.Bottom - S(2) - S(3), pw, S(3)), 1.5f * k, P.Accent);
+                        }
+                    } });
+                }
+                // The tab's own buttons, at the right.
+                var right = new Rectangle(W - M - S(32), S(8), S(32), S(32));
+                if (tab == FlyoutTab.Live)
+                {
+                    bool paused = app.paused;
+                    bool keyOk = app.hotkey != null && app.hotkey.Registered;
+                    items.Add(new Item { Rect = right, Key = "pause", Name = paused ? "Resume switching" : "Pause switching",
+                        Tip = (paused ? "Switching is paused. " : "Stops all switching until you resume. ") + HotKey.Text + (keyOk || sample != null ? " does this from anywhere." : " is taken by another program."),
+                        Click = () => { app.SetPaused(!app.paused); Rebuild(); },
+                        Paint = (g, rc, lk) => SubtleButton(g, rc, lk, paused ? "" : "", fonts.GlyphSmall, Theme.Mix(P.Ink(P.Text2, sbg), P.Ink(P.Text1, sbg), lk.Hover), sbg) });
+                }
+                else if (tab == FlyoutTab.Games)
+                {
+                    // The two things to do with the list: scan again, add something by hand.
+                    var look = new Rectangle(right.X - S(4) - S(32), right.Y, S(32), S(32));
+                    bool scanning = app.scanning;
+                    items.Add(new Item { Rect = look, Key = "look", Tip = scanning ? "Looking for games…" : "Look for games", Busy = scanning, Listed = true,
+                        Click = scanning ? null : (Action)(() => { app.ScanInBackground(true); Rebuild(); }),
                         Paint = (g, rc, lk) =>
                         {
-                            // Busy, it is never narrower than its text is right now: the outgoing step's characters
-                            // finish rolling out inside the button instead of being cut off by it.
-                            float b = (float)Math.Max(0, Math.Min(1, lk.Busy));
-                            float need = lk.On > 0.01 ? roll.Width + b * (spin + gap) + S(36) - b * S(6) : 0;
-                            float w = (float)Math.Max(rc.Height, Math.Min(rc.Width, Math.Max(lk.Width, need)));
-                            var pill = new RectangleF(rc.X + (rc.Width - w) / 2 + (float)lk.Shake, rc.Y, w, rc.Height);
-                            Color bg = P.CardSolid;
-                            Color primary = Theme.Mix(Theme.Mix(P.Accent, P.AccentHover, lk.Hover), P.AccentPress, lk.Press);
-                            Color standard = Theme.Mix(Theme.Mix(P.ControlFill, P.ControlFill2, lk.Hover), P.ControlFill3, lk.Press);
-                            Color fill = Theme.Mix(primary, standard, lk.On);
-                            Theme.Fill(g, pill, S(4), fill);
-                            Outline(g, pill, S(4), Theme.Fade(P.ControlStroke, lk.On));
-                            Color under = Palette.Over(fill, bg);
-                            Color fg = Theme.Mix(P.Ink(P.OnAccent, under), P.Ink(P.Text1, under), lk.On);
-                            float x = pill.X + (pill.Width - (b * (spin + gap) + roll.Width)) / 2;
-                            Theme.Spinner(g, new PointF(x + spin / 2f, pill.Y + pill.Height / 2), spin * (0.6f + 0.4f * b), Math.Max(1.5f, 2 * k), fg, b);
-                            DrawRollAt(g, roll, fonts.Strong, fg, under, Rectangle.Round(pill), x + b * (spin + gap));
-                        }
-                    });
+                            // While it looks, the symbol fades out and a spinner takes its place.
+                            Color fg = P.Ink(P.Text2, sbg);
+                            SubtleButton(g, rc, lk, "", fonts.GlyphSmall, Theme.Mix(sbg, fg, 1 - lk.Busy), sbg);
+                            Theme.Spinner(g, new PointF(rc.X + rc.Width / 2f, rc.Y + rc.Height / 2f), S(13), Math.Max(1.5f, 1.75f * k), fg, lk.Busy);
+                        } });
+                    items.Add(new Item { Rect = right, Key = "add", Tip = "Add a program", Click = () => { picking = true; Into("add"); Rebuild(); },
+                        Paint = (g, rc, lk) => SubtleButton(g, rc, lk, "", fonts.GlyphSmall, P.Ink(P.Text2, sbg), sbg) });
                 }
-                y = c1.Bottom + G;
-                card = c1;
-                int firstBelow = items.Count;
+                return S(48);
+            }
 
-                // The three settings: a group of card rows, each with a toggle switch.
-                int rowCH = S(52);
-                Group(new Rectangle(M, y, cw, 3 * rowCH), 3);
-                CardToggle(new Rectangle(M, y, cw, rowCH), "startup", "", "Start with Windows", "Runs in the tray", IsStartupNow(), true, false,
-                    () => { SetStartup(!IsStartup()); Rebuild(); });
-                CardToggle(new Rectangle(M, y + rowCH, cw, rowCH), "recording", "", "SDR while recording", "OBS, Streamlabs, XSplit, vMix…", app.sdrWhileRecording, false, false,
-                    () => { app.SetSdrWhileRecording(!app.sdrWhileRecording); Rebuild(); });
-                CardToggle(new Rectangle(M, y + 2 * rowCH, cw, rowCH), "island", null, "Island", "A pill at the top of the screen", app.islandOn, false, true,
-                    () => { app.SetIsland(!app.islandOn); Rebuild(); });
-                y += 3 * rowCH + G;
+            /// <summary>
+            /// The scrolling part of a tab: items from 'from' on scroll inside clip, which is as tall as fits (shown) of
+            /// content pixels; a wheel notch moves by step.
+            /// </summary>
+            void Scroller(int from, Rectangle clip, int content, int step)
+            {
+                for (int i = from; i < items.Count; i++) items[i].Scrolls = true;
+                listClip = clip;
+                rowH = step;
+                scrollMax = Math.Max(0, content - clip.Height);
+                if (scrollTo.Target > scrollMax) scrollTo.Snap(scrollMax);
+                scroll = (int)Math.Round(scrollTo.Value);
+            }
 
-                // How long to wait before switching back. (The pause is in the footer bar, to keep the panel short.)
+            /// <summary>The footer bar, the whole width of the window under a divider. Returns its (opaque) colour.</summary>
+            Color Footer(int W, int y, int h)
+            {
+                Color fbg = P.HighContrast ? P.Surface : P.FootSolid;
+                items.Add(new Item { Rect = new Rectangle(0, y, W, h), Paint = (g, rc, lk) =>
+                {
+                    using (var b = new SolidBrush(fbg)) g.FillRectangle(b, rc);
+                    using (var b = new SolidBrush(P.Divider)) g.FillRectangle(b, rc.X, rc.Y, rc.Width, DividerWidth());
+                } });
+                return fbg;
+            }
+
+            /// <summary>A section's header in the Settings tab (Body Strong), as Windows' Settings has them.</summary>
+            void Section(string text, int M, int y, int h)
+            {
+                Color sbg = P.Surface;
+                items.Add(new Item { Rect = new Rectangle(M + S(4), y, S(300), h), Role = AccessibleRole.StaticText, Name = text,
+                    Paint = (g, rc, lk) => Draw(g, text, fonts.Strong, P.Ink(P.Text1, sbg), new Rectangle(rc.X, rc.Bottom - S(24), rc.Width, S(20)), TfLeft) });
+            }
+
+            // ---- Live: what is switched right now ----
+
+            string shownTitle, shownSub;   // the status Live shows, for the countdown's clock to see when it changes
+
+            /// <summary>
+            /// The Live tab: the running game and when things go back, then the layers in effect as one grouped card
+            /// (HDR, SDR brightness, competitive area, stretch, NVIDIA scaling), then what holds switching back: the
+            /// pause and SDR while recording. A new version waits in the footer bar.
+            /// </summary>
+            int BuildLive(int W, int M, int y)
+            {
+                int cw = W - 2 * M, G = S(8), rowCH = S(52);
+                var s = Snapshot();
+                string title, sub;
+                LiveStatus(s, out title, out sub);
+                shownTitle = title;
+                shownSub = sub;
+                string notice = app.notice;   // the latest setup hint, until things settle
+                int textW = cw - S(8);
+                int noticeH = notice == null ? 0 : TextRenderer.MeasureText(notice, fonts.Caption, new Size(textW, 2000), TfWrap).Height;
+                var st = new Rectangle(M, y, cw, S(28) + S(16) + (notice != null ? S(6) + noticeH : 0));
+                RollText titleRoll = Roll("title", title, fonts.Title), subRoll = Roll("sub", sub, fonts.Caption);
+                items.Add(new Item { Rect = st, Key = "status", InCard = true, Grows = true, Role = AccessibleRole.StaticText,
+                    Name = title + ". " + sub + (notice != null ? ". " + notice : ""), Paint = (g, rc, lk) =>
+                {
+                    Color bg = P.Surface;
+                    DrawRoll(g, titleRoll, fonts.Title, P.Ink(P.Text1, bg), bg, new Rectangle(rc.X + S(4), rc.Y, textW, S(28)), -1);
+                    DrawRoll(g, subRoll, fonts.Caption, P.Ink(P.Text2, bg), bg, new Rectangle(rc.X + S(4), rc.Y + S(28), textW, S(16)), -1);
+                    if (notice != null) Draw(g, notice, fonts.Caption, P.Ink(P.Text2, bg), new Rectangle(rc.X + S(4), rc.Y + S(50), textW, noticeH), TfWrap);
+                } });
+                card = st;
+                y = st.Bottom + G;
+                belowFrom = items.Count;
+
+                // The body scrolls when the panel wouldn't fit above the taskbar.
+                int top = y, from = items.Count;
+                var layers = LiveLayers(s);
+                Group(new Rectangle(M, y, cw, layers.Count * rowCH), layers.Count);
+                for (int i = 0; i < layers.Count; i++) LayerRow(new Rectangle(M, y + i * rowCH, cw, rowCH), layers[i]);
+                y += layers.Count * rowCH + G;
+                if (s.Paused) { PausedBar(new Rectangle(M, y, cw, rowCH)); y += rowCH + G; }
                 Group(new Rectangle(M, y, cw, rowCH), 1);
+                string rec = s.Recorder;
+                string recDesc = rec != null ? rec + " is running · HDR held off" : s.RecordingOn ? "Holds HDR off while OBS, Streamlabs… run" : "OBS, Streamlabs, XSplit, vMix…";
+                CardToggle(new Rectangle(M, y, cw, rowCH), "recording", "rec", "SDR while recording", recDesc, app.sdrWhileRecording, true, true,
+                    () => { app.SetSdrWhileRecording(!app.sdrWhileRecording); Rebuild(); }, rec != null);
+                y += rowCH;
+                int content = y - top + S(4);
+
+                // A new version: a footer bar with what it is (or why it waits, or why it failed) and the button.
+                int footH = 0, btnW = 0, noteW = 0, noteH = 0;
+                string note = null;
+                if (app.update != null)
+                {
+                    note = app.UpdateNote ?? "Version " + app.update.VersionText + " is ready";
+                    btnW = UpdateWidth();
+                    noteW = cw - S(28) - S(12) - btnW;
+                    noteH = TextRenderer.MeasureText(note, fonts.Caption, new Size(noteW, 2000), TfWrap).Height;
+                    footH = Math.Max(S(52), noteH + S(24));
+                }
+                int gap = footH > 0 ? G : M;
+                int shown = FlyoutBody(Where().WorkingArea.Height, S(12), top + gap + footH, content, rowCH);
+                Scroller(from, new Rectangle(0, top, W, shown), content, rowCH);
+                y = top + shown + gap;
+                if (footH > 0)
+                {
+                    Color fbg = Footer(W, y, footH);
+                    string noteText = note;
+                    items.Add(new Item { Rect = new Rectangle(M, y, noteW + S(28), footH), Paint = (g, rc, lk) =>
+                    {
+                        LineIcon(g, "update", new Rectangle(rc.X, rc.Y + (rc.Height - S(20)) / 2, S(20), S(20)), P.Ink(P.Text2, fbg));
+                        Draw(g, noteText, fonts.Caption, P.Ink(P.Text2, fbg), new Rectangle(rc.X + S(28), rc.Y + (rc.Height - noteH) / 2, noteW, noteH), TfWrap);
+                    } });
+                    UpdateButton(new Rectangle(W - M - btnW, y + (footH - S(32)) / 2, btnW, S(32)), fbg);
+                    y += footH;
+                }
+                return y;
+            }
+
+            /// <summary>The app's state now, for the Live tab (the render harness's made-up state instead of Windows').</summary>
+            LiveState Snapshot()
+            {
+                var s = new LiveState { Paused = app.paused, Delay = app.sdrDelay, RecordingOn = app.sdrWhileRecording };
+                bool anyOn;
+                if (sample != null) { anyOn = sample.HdrOn; s.HdrSupported = sample.HdrSupported; }
+                else
+                {
+                    var displays = Hdr.All();
+                    anyOn = displays.Any(d => d.On);
+                    s.HdrSupported = displays.Any(d => d.Supported);
+                }
+                s.HdrOurs = app.owned.Count > 0;
+                s.HdrElsewhere = anyOn && !s.HdrOurs;
+                // The game: one with HDR first, else one with a resolution.
+                var names = app.running.Values.Select(r => r.Name).Distinct().ToList();
+                string game = names.FirstOrDefault(n => app.games.Contains(n)) ?? names.FirstOrDefault(n => app.profiles.ContainsKey(n)) ?? names.FirstOrDefault();
+                var res = app.res;
+                if (game != null)
+                {
+                    s.Game = app.DisplayName(game);
+                    s.GameHdr = app.games.Contains(game);
+                    s.GameArea = app.profiles.ContainsKey(game);
+                    s.GameStretch = app.StretchOf(game) != null;
+                    s.GameBrightness = app.brightness.ContainsKey(game);
+                }
+                if (sample != null ? sample.Grace >= 0 : app.sdrTimer.Enabled)
+                    s.GraceLeft = sample != null ? sample.Grace : Math.Max(1, (int)Math.Ceiling((app.sdrDelay * 1000 - app.grace.ElapsedMilliseconds) / 1000.0));
+                s.BackTo = s.HdrOurs ? "SDR" : res != null && res.Back != null ? res.Back.Text : null;
+                if (app.brightBack >= 0 && app.brightSet >= 0) s.Brightness = Hdr.PercentOf(app.brightSet);
+                s.BrightnessLeft = app.brightLeft != null;
+                if (res != null)
+                {
+                    s.Area = res.Area ?? res.Mode;
+                    s.Stretch = res.Area != null ? res.Mode : null;
+                    s.StretchLost = sample == null && app.StretchLost();   // asks the driver
+                    s.ScalingTaken = res.ScalingBack >= 0;
+                    Resolution.Mode full;
+                    double inches;
+                    if (sample != null) { full = sample.Full; inches = sample.Inches; }
+                    else
+                    {
+                        var pic = Resolution.Read(res.Gdi);   // the panel's own size is the target of the display path
+                        full = pic != null ? new Resolution.Mode { Width = pic.TargetW, Height = pic.TargetH } : res.Back;
+                        inches = Resolution.Inches(res.Gdi);
+                    }
+                    s.AreaDetail = full != null ? SizeText(s.Area, full, inches) : null;
+                }
+                s.ScalingStray = app.strayScaling >= 0;
+                s.Recorder = app.recorder != null ? app.RecorderName(app.recorder) : null;
+                if (sample != null) s.Screen = sample.ScreenName;
+                else
+                {
+                    // The monitor in play: the one with HDR on for the game, else the one with its resolution.
+                    try
+                    {
+                        Hdr.Display d = app.owned.FirstOrDefault();
+                        if (d == null && res != null) d = Hdr.All().FirstOrDefault(x => x.Gdi == res.Gdi);
+                        if (d != null) s.Screen = Hdr.FriendlyName(d);
+                    }
+                    catch (Exception e) { Guard.Log("Reading the monitor's name", e); }
+                }
+                return s;
+            }
+
+            /// <summary>
+            /// One layer of the stack: its icon (the accent colour while in effect, amber for HDR), title and what it does,
+            /// and its value on the right – for HDR in effect, the amber ON marker. Not a control: a screen reader reads
+            /// it as text, its name and value.
+            /// </summary>
+            void LayerRow(Rectangle r, LiveLayer l)
+            {
+                bool hdr = l.Key == "hdr", marker = hdr && l.Active;
+                string value = l.Value;
+                items.Add(new Item { Rect = r, Key = "layer:" + l.Key, On = l.Active, Role = AccessibleRole.StaticText,
+                    Name = l.Title + ", " + (marker ? "on" : value == NoValue ? "nothing" : value), Tip = l.Desc, Paint = (g, rc, lk) =>
+                {
+                    Color bg = P.CardSolid;
+                    int vw = marker ? MarkW() : TextRenderer.MeasureText(value, fonts.Caption, Size.Empty, TfLeft).Width + S(2);
+                    int ix = rc.X + S(14), tx = ix + S(20) + S(12), tw = rc.Right - S(12) - vw - S(12) - tx;
+                    double on = Math.Max(0, Math.Min(1, lk.On));
+                    Color ic = Theme.Mix(P.Ink(P.Text3, bg), hdr && !P.HighContrast ? P.HdrDot : P.Accent, on);
+                    LineIcon(g, l.Key, new Rectangle(ix, rc.Y + (rc.Height - S(20)) / 2, S(20), S(20)), ic);
+                    int ty = rc.Y + (rc.Height - S(36)) / 2;
+                    Draw(g, l.Title, fonts.Body, Theme.Mix(P.Ink(P.Text2, bg), P.Ink(P.Text1, bg), on), new Rectangle(tx, ty, tw, S(20)), TfLeft);
+                    Draw(g, l.Desc, fonts.Caption, P.Ink(P.Text2, bg), new Rectangle(tx, ty + S(20), tw, S(16)), TfLeft);
+                    var vr = new Rectangle(rc.Right - S(12) - vw, rc.Y, vw, rc.Height);
+                    if (marker) HdrMark(g, new Rectangle(vr.X, rc.Y + (rc.Height - S(20)) / 2, vw, S(20)), bg);
+                    else Draw(g, value, fonts.Caption, P.Ink(value == NoValue ? P.Text3 : P.Text2, bg), vr, TfLeft | TextFormatFlags.Right);
+                } });
+            }
+
+            /// <summary>
+            /// Paused: a caution bar (WinUI's InfoBar, warning) under the layers, with Resume. Ctrl+Alt+H does the same.
+            /// </summary>
+            void PausedBar(Rectangle r)
+            {
+                bool light = P.Mode == Palette.Kind.Light;
+                Color fill = P.HighContrast ? P.Surface : light ? Color.FromArgb(0xFF, 0xF4, 0xCE) : Color.FromArgb(0x43, 0x35, 0x19);   // SystemFillColorCautionBackground
+                int resumeW = TextRenderer.MeasureText("Resume", fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                items.Add(new Item { Rect = r, Key = "paused", Role = AccessibleRole.StaticText, Name = "Paused · nothing switches", Tip = HotKey.Text + " resumes, from anywhere",
+                    Paint = (g, rc, lk) =>
+                {
+                    Theme.Fill(g, rc, S(4), fill);
+                    Outline(g, rc, S(4), P.HighContrast ? P.Text1 : P.CardStroke);
+                    Color ic = P.HighContrast ? P.Text1 : P.Caution;
+                    int ix = rc.X + S(14), tx = ix + S(20) + S(12), tw = rc.Right - S(12) - resumeW - S(12) - tx;
+                    LineIcon(g, "pause", new Rectangle(ix, rc.Y + (rc.Height - S(20)) / 2, S(20), S(20)), ic);
+                    int ty = rc.Y + (rc.Height - S(36)) / 2;
+                    Draw(g, "Paused · nothing switches", fonts.Strong, P.Ink(P.Text1, fill), new Rectangle(tx, ty, tw, S(20)), TfLeft);
+                    Draw(g, HotKey.Text + " resumes, from anywhere", fonts.Caption, P.Ink(P.Text2, fill), new Rectangle(tx, ty + S(20), tw, S(16)), TfLeft);
+                } });
+                var br = new Rectangle(r.Right - S(12) - resumeW, r.Y + (r.Height - S(32)) / 2, resumeW, S(32));
+                items.Add(new Item { Rect = br, Key = "resume", Name = "Resume switching", Click = () => { app.SetPaused(false); Rebuild(); },
+                    Paint = (g, rc, lk) => StandardButton(g, rc, lk, fill, null, "Resume") });
+            }
+
+            // ---- Settings: everything that isn't per game ----
+
+            /// <summary>
+            /// The Settings tab, in two groups as Windows' Settings has them. Switching: the wait before switching back,
+            /// SDR while recording, the pause shortcut. App: start with Windows, the island, updates. The footer bar says
+            /// where the files are, opens that folder, and exits.
+            /// </summary>
+            int BuildSettings(int W, int M, int y)
+            {
+                int cw = W - 2 * M, rowCH = S(52), secH = S(36);
+                int top = y, from = items.Count;
+                y -= S(4);
+                Section("Switching", M, y, secH);
+                y += secH;
+                Group(new Rectangle(M, y, cw, 3 * rowCH), 3);
+                // How long to wait before switching back: a segmented control.
                 int segW = S(140), segH = S(28);
                 var wait = new Rectangle(M, y, cw, rowCH);
-                items.Add(new Item { Rect = wait, Paint = (g, rc, lk) => RowText(g, rc, "", "Switch back after", "After a game closes", 0, S(12) + segW + S(12)) });
+                items.Add(new Item { Rect = wait, Paint = (g, rc, lk) => RowText(g, rc, "clock", "Switch back after", "After a game closes", 0, S(12) + segW + S(12)) });
                 var seg = new Rectangle(wait.Right - S(12) - segW, wait.Y + (rowCH - segH) / 2, segW, segH);
                 items.Add(new Item { Rect = seg, Paint = (g, rc, lk) =>
                 {
@@ -762,10 +1138,148 @@ namespace HdrSwitch
                         Name = "Switch back after " + v + " seconds", Tip = "The wait after a game closes, for launchers that restart it.",
                         Click = () => { app.SetDelay(v); Rebuild(); }, Paint = (g, rc, lk) => Segment(g, rc, lk, text) });
                 }
-                y += rowCH + G;
+                CardToggle(new Rectangle(M, y + rowCH, cw, rowCH), "recording", "rec", "SDR while recording", "OBS, Streamlabs, XSplit, vMix…", app.sdrWhileRecording, false, false,
+                    () => { app.SetSdrWhileRecording(!app.sdrWhileRecording); Rebuild(); }, false);
+                bool keyOk = app.hotkey != null && app.hotkey.Registered || sample != null;
+                string keys = HotKey.Text.Replace("+", " + ");
+                int keysW = TextRenderer.MeasureText(keys, fonts.Caption, Size.Empty, TfLeft).Width + S(2);
+                string keyDesc = keyOk ? "Stops all switching, from anywhere" : "Taken by another program";
+                items.Add(new Item { Rect = new Rectangle(M, y + 2 * rowCH, cw, rowCH), Key = "shortcut", Role = AccessibleRole.StaticText, Name = "Pause shortcut, " + HotKey.Text, Tip = keyDesc,
+                    Paint = (g, rc, lk) =>
+                {
+                    RowText(g, rc, "pause", "Pause shortcut", keyDesc, 0, S(12) + keysW + S(12));
+                    Draw(g, keys, fonts.Caption, P.Ink(P.Text2, P.CardSolid), new Rectangle(rc.Right - S(12) - keysW, rc.Y, keysW, rc.Height), TfLeft | TextFormatFlags.Right);
+                } });
+                y += 3 * rowCH;
 
-                // The list: games with a switch each, running programs to add, or the resolutions for one game.
-                int headH = S(40), barH = S(48);
+                Section("App", M, y, secH);
+                y += secH;
+                Group(new Rectangle(M, y, cw, 3 * rowCH), 3);
+                CardToggle(new Rectangle(M, y, cw, rowCH), "startup", "power", "Start with Windows", "Runs in the tray", IsStartupNow(), true, false,
+                    () => { SetStartup(!IsStartup()); Rebuild(); }, false);
+                CardToggle(new Rectangle(M, y + rowCH, cw, rowCH), "island", "island", "Island", "A pill at the top of the screen", app.islandOn, false, false,
+                    () => { app.SetIsland(!app.islandOn); Rebuild(); }, false);
+                // Updates: the version running, and the button when there is a newer one.
+                var ur = new Rectangle(M, y + 2 * rowCH, cw, rowCH);
+                string version = Updater.CurrentText;
+                int verW = TextRenderer.MeasureText(version, fonts.Caption, Size.Empty, TfLeft).Width + S(2);
+                bool hasUpdate = app.update != null;
+                int btnW = hasUpdate ? UpdateWidth() : 0, btnNow = hasUpdate ? UpdateFit() : 0;
+                string upDesc = !hasUpdate ? "Signed releases, checked daily" : app.UpdateNote ?? "Version " + app.update.VersionText + " is ready";
+                int rightW = S(12) + verW + (hasUpdate ? S(12) + btnNow : 0) + S(12);
+                items.Add(new Item { Rect = ur, Key = "updates", Role = AccessibleRole.StaticText, Name = "Updates, version " + version, Tip = upDesc, Paint = (g, rc, lk) =>
+                {
+                    RowText(g, rc, "update", "Updates", upDesc, 0, rightW);
+                    int vx = rc.Right - rightW + S(12);
+                    Draw(g, version, fonts.Caption, P.Ink(P.Text2, P.CardSolid), new Rectangle(vx, rc.Y, verW, rc.Height), TfLeft | TextFormatFlags.Right);
+                } });
+                if (hasUpdate) UpdateButton(new Rectangle(ur.Right - S(12) - btnW, ur.Y + (rowCH - S(32)) / 2, btnW, S(32)), P.CardSolid);
+                y += 3 * rowCH;
+                int content = y - top + S(4);
+
+                // The footer bar: where the files are, open that folder, exit.
+                int barH = S(52);
+                int shown = FlyoutBody(Where().WorkingArea.Height, S(12), top + S(8) + barH, content, rowCH);
+                Scroller(from, new Rectangle(0, top, W, shown), content, rowCH);
+                y = top + shown + S(8);
+                Color fbg = Footer(W, y, barH);
+                int exitW = TextRenderer.MeasureText("Exit", fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                int openW = TextRenderer.MeasureText("Open folder", fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                var exit = new Rectangle(W - M - exitW, y + (barH - S(32)) / 2, exitW, S(32));
+                var open = new Rectangle(exit.X - S(8) - openW, exit.Y, openW, S(32));
+                const string FilesAt = @"Files in %AppData%\HdrSwitch";
+                items.Add(new Item { Rect = new Rectangle(M + S(4), y, open.X - S(8) - M - S(4), barH), Paint = (g, rc, lk) =>
+                    Draw(g, FilesAt, fonts.Caption, P.Ink(P.Text2, fbg), rc, TfLeft) });
+                items.Add(new Item { Rect = open, Key = "folder", Name = "Open folder", Tip = Dir, Click = () =>
+                {
+                    Dismiss(true);   // at once: Explorer is about to come to the front
+                    try { Process.Start("explorer.exe", "\"" + Dir + "\""); } catch { }
+                }, Paint = (g, rc, lk) => StandardButton(g, rc, lk, fbg, null, "Open folder") });
+                items.Add(new Item { Rect = exit, Key = "exit", Name = "Exit Display Switch", Click = () => app.ExitThread(),
+                    Paint = (g, rc, lk) => StandardButton(g, rc, lk, fbg, null, "Exit") });
+                return y + barH;
+            }
+
+            // ---- the update button: in Live's footer bar and in Settings' Updates row ----
+
+            /// <summary>Wide enough for every step the button shows, so it never outgrows its place.</summary>
+            int UpdateWidth()
+            {
+                int spin = S(16), gap = S(8), w = TextRenderer.MeasureText("Update", fonts.Strong, Size.Empty, TfLeft).Width + S(24);
+                foreach (string step in new[] { "Downloading", "Verifying", "Restarting", UpdateWaits, UpdateFailed, app.updateStep ?? "" })
+                    w = Math.Max(w, TextRenderer.MeasureText(step, fonts.Strong, Size.Empty, TfLeft).Width + S(12) + spin + gap + S(18));
+                return w;
+            }
+
+            /// <summary>How wide the update button is now, for its label: what the text beside it can't use.</summary>
+            int UpdateFit()
+            {
+                bool busy = app.updating, failed = app.updateStep == UpdateFailed, waits = app.updateStep == UpdateWaits;
+                string label = busy ? app.updateStep ?? "Downloading" : "Update";
+                int text = TextRenderer.MeasureText(label, fonts.Strong, Size.Empty, TfLeft).Width;
+                return (!busy ? S(24) : failed || waits ? S(18) : S(12) + S(16) + S(8)) + text + (busy ? S(18) : 0);
+            }
+
+            /// <summary>
+            /// The update button, at the right of ur. An accent (primary) button while it waits for a click; once clicked a
+            /// standard button around a spinner, its label rolling through the steps of the update; a failure says so with
+            /// a nudge, and the reason is in the line beside it. Held back by a game it says "After the game", without the
+            /// spinner.
+            /// </summary>
+            void UpdateButton(Rectangle ur, Color bg)
+            {
+                bool busy = app.updating, failed = app.updateStep == UpdateFailed, waits = app.updateStep == UpdateWaits;
+                string label = busy ? app.updateStep ?? "Downloading" : "Update";
+                RollText roll = Roll("update", label, fonts.Strong);
+                int spin = S(16), gap = S(8);
+                float fit = (!busy ? S(24) : failed || waits ? S(18) : S(12) + spin + gap) + roll.TargetWidth + (busy ? S(18) : 0);
+                items.Add(new Item
+                {
+                    Name = busy ? label : "Update to " + app.update.VersionText, Tip = app.UpdateNote, Rect = ur, Key = "update", On = busy, Busy = busy && !failed && !waits,
+                    Width = Math.Min(ur.Width, fit), Shake = failed, Listed = true,
+                    Click = busy ? null : (Action)(() => { app.InstallUpdate(); Rebuild(); }),
+                    Paint = (g, rc, lk) =>
+                    {
+                        // Busy, it is never narrower than its text is right now: the outgoing step's characters finish
+                        // rolling out inside the button instead of being cut off by it.
+                        float b = (float)Math.Max(0, Math.Min(1, lk.Busy));
+                        float need = lk.On > 0.01 ? roll.Width + b * (spin + gap) + S(36) - b * S(6) : 0;
+                        float w = (float)Math.Max(rc.Height, Math.Min(rc.Width, Math.Max(lk.Width, need)));
+                        var pill = new RectangleF(rc.Right - w + (float)lk.Shake, rc.Y, w, rc.Height);
+                        Color primary = Theme.Mix(Theme.Mix(P.Accent, P.AccentHover, lk.Hover), P.AccentPress, lk.Press);
+                        Color standard = Theme.Mix(Theme.Mix(P.ControlFill, P.ControlFill2, lk.Hover), P.ControlFill3, lk.Press);
+                        Color fill = Theme.Mix(primary, standard, lk.On);
+                        Theme.Fill(g, pill, S(4), fill);
+                        Outline(g, pill, S(4), Theme.Fade(P.ControlStroke, lk.On));
+                        Color under = Palette.Over(fill, bg);
+                        Color fg = Theme.Mix(P.Ink(P.OnAccent, under), P.Ink(P.Text1, under), lk.On);
+                        float x = pill.X + (pill.Width - (b * (spin + gap) + roll.Width)) / 2;
+                        Theme.Spinner(g, new PointF(x + spin / 2f, pill.Y + pill.Height / 2), spin * (0.6f + 0.4f * b), Math.Max(1.5f, 2 * k), fg, b);
+                        DrawRollAt(g, roll, fonts.Strong, fg, under, Rectangle.Round(pill), x + b * (spin + gap));
+                    }
+                });
+            }
+
+            // ---- Games: the list, and a game's views ----
+
+            /// <summary>The refresh rate a game's resolutions are listed at: its own, else the display's now.</summary>
+            int HzFor(string game)
+            {
+                Resolution.Mode chosen;
+                app.profiles.TryGetValue(game, out chosen);
+                if (chosen != null && chosen.Hz > 0) return chosen.Hz;
+                var cur = sample != null ? sample.Current : Resolution.Current(TargetGdi());
+                return cur != null ? cur.Hz : 60;
+            }
+
+            /// <summary>
+            /// The Games tab: games with a switch each, the running programs to add, or one game's resolutions, stretch
+            /// or SDR brightness levels. Up to five rows, fewer when the panel wouldn't fit above the taskbar; the footer
+            /// bar says how many have HDR and has the pencil for the file behind what the list shows.
+            /// </summary>
+            int BuildGames(int W, int M, int y)
+            {
+                int cw = W - 2 * M, G = S(8);
                 rowH = S(44);
                 var names = new List<string>();
                 var modes = new List<Resolution.Mode>();   // choosing: null for "Off", then the display's sizes
@@ -779,7 +1293,7 @@ namespace HdrSwitch
                     string gdi = sample != null ? null : TargetGdi();
                     var cur = sample != null ? sample.Current : Resolution.Current(gdi);
                     app.profiles.TryGetValue(choosing, out chosen);
-                    hz = chosen != null && chosen.Hz > 0 ? chosen.Hz : cur != null ? cur.Hz : 60;
+                    hz = HzFor(choosing);
                     if (sample != null) { full = sample.Full; inches = sample.Inches; }
                     else
                     {
@@ -815,50 +1329,11 @@ namespace HdrSwitch
                 else names = app.games.Concat(app.excluded).Concat(app.profiles.Keys).Distinct().OrderBy(app.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
                 int count = choosing != null ? (brightening ? levels.Count : modes.Count) : names.Count;
                 int footH = choosing != null ? S(52) : S(4);
-                // Up to five rows, fewer when the whole panel wouldn't fit above the taskbar (a high scale, a tall status card).
-                int visible = FlyoutRows(Where().WorkingArea.Height, S(12), y + headH + footH + G + barH, rowH, count);
-                var c3 = new Rectangle(M, y, cw, headH + visible * rowH + footH);
+                // Up to five rows, fewer when the whole panel wouldn't fit above the taskbar (a high scale).
+                int visible = FlyoutRows(Where().WorkingArea.Height, S(12), GamesFixed(k, choosing != null), rowH, count);
+                var c3 = new Rectangle(M, y + S(4), cw, visible * rowH + footH);
                 Color sbg = P.Surface;
-                if (picking || choosing != null)
-                {
-                    var back = new Rectangle(c3.X, c3.Y + S(4), S(32), S(32));
-                    items.Add(new Item { Rect = back, Key = "back", Name = "Back", Click = GoBack,
-                        Paint = (g, rc, lk) => SubtleButton(g, rc, lk, "", fonts.GlyphSmall, P.Ink(P.Text1, sbg), sbg) });
-                    string head = picking ? "Add a program" : app.DisplayName(choosing);
-                    string headRight = picking ? "" : brightening ? "SDR brightness" : stretching ? "inside " + chosen.Text : "at " + hz + " Hz";
-                    int rightW = headRight.Length == 0 ? 0 : TextRenderer.MeasureText(headRight, fonts.Caption, Size.Empty, TfLeft).Width + S(8);
-                    items.Add(new Item { Rect = new Rectangle(c3.X, c3.Y, c3.Width, headH), Paint = (g, rc, lk) =>
-                    {
-                        Draw(g, head, fonts.Strong, P.Ink(P.Text1, sbg), new Rectangle(rc.X + S(40), rc.Y, rc.Width - S(40) - S(4) - rightW, headH), TfLeft);
-                        Draw(g, headRight, fonts.Caption, P.Ink(P.Text2, sbg), new Rectangle(rc.Right - S(4) - rightW, rc.Y, rightW, headH), TfLeft | TextFormatFlags.Right);
-                    } });
-                }
-                else
-                {
-                    RollText onCount = Roll("count", app.games.Count + " on", fonts.Caption);
-                    int gamesW = TextRenderer.MeasureText("Games", fonts.Strong, Size.Empty, TfLeft).Width + S(6);   // measured a little short for semibold
-                    items.Add(new Item { Rect = new Rectangle(c3.X, c3.Y, c3.Width, headH), Paint = (g, rc, lk) =>
-                    {
-                        Draw(g, "Games", fonts.Strong, P.Ink(P.Text1, sbg), new Rectangle(rc.X + S(4), rc.Y, gamesW, headH), TfLeft);
-                        DrawRoll(g, onCount, fonts.Caption, P.Ink(P.Text2, sbg), sbg, new Rectangle(rc.X + S(4) + gamesW + S(6), rc.Y + S(1), S(100), headH), -1);
-                    } });
-                    // The two things to do with the list sit in its header: scan again, add something by hand.
-                    var add = new Rectangle(c3.Right - S(32), c3.Y + S(4), S(32), S(32));
-                    var look = new Rectangle(add.X - S(4) - S(32), add.Y, S(32), S(32));
-                    bool scanning = app.scanning;
-                    items.Add(new Item { Rect = look, Key = "look", Tip = scanning ? "Looking for games…" : "Look for games", Busy = scanning, Listed = true,
-                        Click = scanning ? null : (Action)(() => { app.ScanInBackground(true); Rebuild(); }),
-                        Paint = (g, rc, lk) =>
-                        {
-                            // While it looks, the magnifier fades out and a spinner takes its place.
-                            Color fg = P.Ink(P.Text2, sbg);
-                            SubtleButton(g, rc, lk, "", fonts.GlyphSmall, Theme.Mix(sbg, fg, 1 - lk.Busy), sbg);
-                            Theme.Spinner(g, new PointF(rc.X + rc.Width / 2f, rc.Y + rc.Height / 2f), S(13), Math.Max(1.5f, 1.75f * k), fg, lk.Busy);
-                        } });
-                    items.Add(new Item { Rect = add, Key = "add", Tip = "Add a program", Click = () => { picking = true; Into("add"); Rebuild(); },
-                        Paint = (g, rc, lk) => SubtleButton(g, rc, lk, "", fonts.GlyphSmall, P.Ink(P.Text2, sbg), sbg) });
-                }
-                listClip = new Rectangle(c3.X, c3.Y + headH, c3.Width, visible * rowH);
+                listClip = new Rectangle(c3.X, c3.Y, c3.Width, visible * rowH);
                 scrollMax = Math.Max(0, count * rowH - listClip.Height);
                 if (scrollTo.Target > scrollMax) scrollTo.Snap(scrollMax);
                 scroll = (int)Math.Round(scrollTo.Value);
@@ -1015,91 +1490,20 @@ namespace HdrSwitch
                 }
                 y = c3.Bottom + G;
 
-                // The footer bar, the whole width of the window under a divider: version, pause, edit the list, exit.
-                var bar = new Rectangle(0, y, W, barH);
-                Color fbg = P.HighContrast ? P.Surface : P.FootSolid;
-                string version = "Display Switch " + Updater.CurrentText;
-                int exitW = TextRenderer.MeasureText("Exit", fonts.Body, Size.Empty, TfLeft).Width + S(24);
-                var exit = new Rectangle(W - M - exitW, y + (barH - S(32)) / 2, exitW, S(32));
-                var edit = new Rectangle(exit.X - S(4) - S(32), exit.Y, S(32), S(32));
-                bool paused = app.paused;
-                bool keyOk = app.hotkey != null && app.hotkey.Registered;
-                RollText pause = Roll("pause", paused ? "Resume" : "Pause", fonts.Body);
-                int pauseW = Math.Max(TextRenderer.MeasureText("Resume", fonts.Body, Size.Empty, TfLeft).Width, TextRenderer.MeasureText("Pause", fonts.Body, Size.Empty, TfLeft).Width) + S(24);
-                var pr = new Rectangle(edit.X - S(8) - pauseW, exit.Y, pauseW, S(32));
-                items.Add(new Item { Rect = bar, Paint = (g, rc, lk) =>
-                {
-                    using (var b = new SolidBrush(fbg)) g.FillRectangle(b, rc);
-                    int dw = DividerWidth();
-                    using (var b = new SolidBrush(P.Divider)) g.FillRectangle(b, rc.X, rc.Y, rc.Width, dw);
-                    Draw(g, version, fonts.Caption, P.Ink(P.Text2, fbg), new Rectangle(rc.X + M + S(4), rc.Y, pr.X - M - S(12), rc.Height), TfLeft);
-                } });
-                items.Add(new Item { Rect = pr, Key = "pause", On = paused, Name = paused ? "Resume switching" : "Pause switching",
-                    Tip = (paused ? "Switching is paused. " : "Stops all switching until you resume. ") + HotKey.Text + (keyOk ? " does this from anywhere." : " is taken by another program."),
-                    Click = () => { app.SetPaused(!app.paused); Rebuild(); },
-                    Paint = (g, rc, lk) => StandardButton(g, rc, lk, fbg, pause, null) });
-                items.Add(new Item { Rect = exit, Key = "exit", Name = "Exit Display Switch", Click = () => app.ExitThread(),
-                    Paint = (g, rc, lk) => StandardButton(g, rc, lk, fbg, null, "Exit") });
+                // The footer bar: how many have HDR, and the pencil.
+                int barH = S(48);
+                Color fbg = Footer(W, y, barH);
+                var edit = new Rectangle(W - M - S(32), y + (barH - S(32)) / 2, S(32), S(32));
+                RollText onCount = Roll("count", app.games.Count + " with HDR", fonts.Caption);
+                items.Add(new Item { Rect = new Rectangle(M + S(4), y, edit.X - S(8) - M - S(4), barH), Paint = (g, rc, lk) =>
+                    DrawRoll(g, onCount, fonts.Caption, P.Ink(P.Text2, fbg), fbg, rc, -1) });
                 string file = FlyoutFile(choosing != null, brightening);   // the file behind what the list shows
                 items.Add(new Item { Rect = edit, Key = "edit", Tip = "Edit " + System.IO.Path.GetFileName(file), Click = () =>
                 {
                     Dismiss(true);   // at once: Notepad is about to come to the front
                     try { Process.Start("notepad.exe", "\"" + file + "\""); } catch { }
                 }, Paint = (g, rc, lk) => SubtleButton(g, rc, lk, "", fonts.Glyph, Theme.Mix(P.Ink(P.Text2, fbg), P.Ink(P.Text1, fbg), lk.Hover), fbg) });
-                y += barH;
-
-                for (int i = firstBelow; i < items.Count; i++) items[i].Below = true;
-                contentH = y;
-                if (Visible && !closing) cardH.To(card.Height);
-                else cardH.Snap(card.Height);
-
-                // The springs follow the new items: kept by key, new ones start where they belong, old ones go.
-                foreach (var a in anims.Values) a.Seen = false;
-                foreach (var it in items)
-                {
-                    if (it.Key == null) continue;
-                    Anim a;
-                    bool fresh = !anims.TryGetValue(it.Key, out a);
-                    if (fresh) anims[it.Key] = a = new Anim();
-                    a.Seen = true;
-                    if (Visible && !fresh)
-                    {
-                        a.On.To(it.On ? 1 : 0);
-                        a.Busy.To(it.Busy ? 1 : 0);
-                        a.Width.To(it.Width);
-                        if (it.Shake && !a.Shaken && !Motion.Reduced) a.Shake.Velocity = 520 * k;   // the Shape spring brings it back with a wobble
-                    }
-                    else
-                    {
-                        a.On.Snap(it.On ? 1 : 0);
-                        a.Busy.Snap(it.Busy ? 1 : 0);
-                        a.Width.Snap(it.Width);
-                    }
-                    a.Shaken = it.Shake;
-                }
-                foreach (string gone in anims.Where(kv => !kv.Value.Seen).Select(kv => kv.Key).ToList()) anims.Remove(gone);
-                foreach (string gone in rolls.Where(kv => !kv.Value.Seen).Select(kv => kv.Key).ToList()) rolls.Remove(gone);
-
-                ClientSize = new Size(W, contentH + Grow);
-                pressed = -1;
-                focus = focusKey == null ? -1 : items.FindIndex(it => it.Key == focusKey);
-                if (!Focusable(focus)) focus = -1;
-                bool into = entered, outOf = returned;
-                entered = returned = false;
-                int firstRow = items.FindIndex(it => it.Scrolls && it.Click != null);
-                if (into && keyboard && firstRow >= 0) SetFocus(firstRow);       // a view opened: the keyboard starts on its first row
-                else if (outOf && keyboard && focus >= 0) SetFocus(focus);        // back: on the control that opened it, scrolled into view
-                else if (focus < 0 && focusKey != null && keyboard) MoveFocus(0);   // its control went: start at the top
-                Tell(before);
-                if (Visible)
-                {
-                    final = Corner(out slide);
-                    Place();
-                    hover = HitTest(PointToClient(Cursor.Position));
-                    tip.SetToolTip(this, hover >= 0 ? items[hover].Tip : null);
-                }
-                else hover = -1;
-                Aim();
+                return y + barH;
             }
 
             // ---- the render harness (--render-flyout): Windows' answers, made up ----
@@ -1112,6 +1516,8 @@ namespace HdrSwitch
                 public double Inches;
                 public List<Resolution.Mode> Modes = new List<Resolution.Mode>();
                 public List<string> Windowed = new List<string>();
+                public string ScreenName;      // the monitor's name
+                public int Grace = -1;         // seconds left of the wait before switching back, or -1
             }
 
             internal Sample sample;   // null: ask Windows, as always
@@ -1121,12 +1527,14 @@ namespace HdrSwitch
             IEnumerable<string> WindowedNow() { return sample != null ? (IEnumerable<string>)sample.Windowed : WindowedApps(); }
 
             /// <summary>
-            /// Draws the flyout as it would look in this view, at scale k, into a new bitmap: no window, no Windows. view:
-            /// games, add, res, stretch, bright (the last three for game). focusKey: an item that shows the keyboard's
-            /// focus ring; hoverKey: one under the mouse. win11: Windows draws the corners (otherwise the 1 px border shows).
+            /// Draws the flyout as it would look on this tab and view, at scale k, into a new bitmap: no window, no Windows.
+            /// view (the Games tab): games, add, res, stretch, bright (the last three for game). focusKey: an item that
+            /// shows the keyboard's focus ring; hoverKey: one under the mouse. win11: Windows draws the corners (otherwise
+            /// the 1 px border shows).
             /// </summary>
-            internal Bitmap Render(float scale, string view, string game, string focusKey, string hoverKey, bool win11)
+            internal Bitmap Render(float scale, FlyoutTab page, string view, string game, string focusKey, string hoverKey, bool win11)
             {
+                tab = page;
                 k = scale;
                 if (fonts != null) fonts.Dispose();
                 fonts = new Theme.Fonts(k);
@@ -1152,33 +1560,6 @@ namespace HdrSwitch
                 var bmp = new Bitmap(size.Width, size.Height, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
                 using (var g = Graphics.FromImage(bmp)) PaintAll(g, size);
                 return bmp;
-            }
-
-            void Status(out string title, out string sub, out bool on)
-            {
-                bool supported;
-                if (sample != null) { on = sample.HdrOn; supported = sample.HdrSupported; }
-                else
-                {
-                    var displays = Hdr.All();
-                    on = displays.Any(d => d.On);
-                    supported = displays.Any(d => d.Supported);
-                }
-                var hdrGames = app.running.Values.Where(r => app.games.Contains(r.Name)).Select(r => app.DisplayName(r.Name)).Distinct().ToList();
-                var res = app.res;
-                if (app.paused) { title = "Paused"; sub = "Nothing switches · " + HotKey.Text + " resumes"; return; }
-                if (!supported) { title = "No HDR display"; sub = "Check Windows display settings"; }
-                else if (app.recorder != null && !on)
-                {
-                    title = "SDR";
-                    sub = app.RecorderName(app.recorder) + " running" + (hdrGames.Count > 0 ? " · " + string.Join(", ", hdrGames) : "");
-                }
-                else if (hdrGames.Count > 0) { title = "HDR on"; sub = string.Join(", ", hdrGames); }
-                else if (res != null) { title = res.Mode.Text; sub = app.DisplayName(res.Game); }
-                else if (on) { title = "HDR is on"; sub = "Turned on elsewhere"; }
-                else { title = "Waiting for a game"; sub = "HDR off"; }
-                if (res != null && hdrGames.Count > 0) sub += " · " + res.Text;
-                else if (res != null && res.Area != null) sub += app.StretchLost() ? " · not stretched" : " · stretched";
             }
 
             /// <summary>"92.5 % · 24.6″": how much of the panel a mode covers when shown 1:1 in the middle.</summary>
@@ -1210,7 +1591,7 @@ namespace HdrSwitch
 
             // ---- the controls: WinUI's, drawn with the palette ----
 
-            const string MarkOn = "HDR ON", MarkOff = "SDR";
+            const string MarkOn = "ON";
 
             /// <summary>The thickness of a card's outline and of a divider: 1 px, 2 px in high contrast.</summary>
             int DividerWidth() { return P.HighContrast ? Math.Max(2, S(2)) : 1; }
@@ -1247,7 +1628,7 @@ namespace HdrSwitch
             /// A card row with a toggle switch: icon, title and description, "On" or "Off", the switch. The whole row is
             /// the control (a click anywhere flips it); first and last: its place in its group, for the hover's corners.
             /// </summary>
-            void CardToggle(Rectangle r, string key, string icon, string label, string desc, bool on, bool first, bool last, Action click)
+            void CardToggle(Rectangle r, string key, string icon, string label, string desc, bool on, bool first, bool last, Action click, bool recording)
             {
                 RollText state = Roll("tile:" + key, on ? "On" : "Off", fonts.Body);
                 int stateW = Math.Max(TextRenderer.MeasureText("Off", fonts.Body, Size.Empty, TfLeft).Width, TextRenderer.MeasureText("On", fonts.Body, Size.Empty, TfLeft).Width) + S(2);
@@ -1256,7 +1637,7 @@ namespace HdrSwitch
                 {
                     CardHover(g, rc, lk, first, last);
                     Color bg = P.CardSolid;
-                    RowText(g, rc, icon, label, desc, lk.On, S(12) + S(40) + S(12) + stateW + S(4));
+                    RowText(g, rc, icon, label, desc, lk.On, S(12) + S(40) + S(12) + stateW + S(4), recording);
                     var tg = new RectangleF(rc.Right - S(12) - S(40), rc.Y + (rc.Height - S(20)) / 2f, S(40), S(20));
                     // The state in words too, as Windows' own settings do: a switch alone doesn't say which side is on.
                     DrawRoll(g, state, fonts.Body, P.Ink(P.Text1, bg), bg, new Rectangle((int)tg.X - S(12) - stateW, rc.Y, stateW, rc.Height), 1);
@@ -1295,18 +1676,88 @@ namespace HdrSwitch
             /// <summary>
             /// A card row's left side: a 16 px icon in a 20 px column, the title (Body) and a description (Caption,
             /// secondary). on 0 → 1 lights the icon in the accent colour. right: what the row's control takes on the right.
+            /// recording: a recorder is running – the icon and a dot before the description in red.
             /// </summary>
-            void RowText(Graphics g, Rectangle rc, string icon, string title, string desc, double on, int right)
+            void RowText(Graphics g, Rectangle rc, string icon, string title, string desc, double on, int right, bool recording = false)
             {
                 Color bg = P.CardSolid;
                 int ix = rc.X + S(14), tx = ix + S(20) + S(12), tw = rc.Right - right - tx;
-                Color ic = Theme.Mix(P.Ink(P.Text2, bg), P.Accent, on);
-                var icr = new Rectangle(ix, rc.Y + (rc.Height - S(20)) / 2, S(20), S(20));
-                if (icon != null) Draw(g, icon, fonts.Glyph, ic, icr, TfCenter);
-                else IslandIcon(g, icr, ic);
+                Color red = P.HighContrast ? P.Text1 : P.Critical;
+                Color ic = recording ? red : Theme.Mix(P.Ink(P.Text2, bg), P.Accent, on);
+                LineIcon(g, icon, new Rectangle(ix, rc.Y + (rc.Height - S(20)) / 2, S(20), S(20)), ic);
                 int top = rc.Y + (rc.Height - S(36)) / 2;
                 Draw(g, title, fonts.Body, P.Ink(P.Text1, bg), new Rectangle(tx, top, tw, S(20)), TfLeft);
-                Draw(g, desc, fonts.Caption, P.Ink(P.Text2, bg), new Rectangle(tx, top + S(20), tw, S(16)), TfLeft);
+                int dx = 0;
+                if (recording)
+                {
+                    Theme.Dot(g, tx + S(3), top + S(28), S(6), red);
+                    dx = S(10);
+                }
+                Draw(g, desc, fonts.Caption, P.Ink(P.Text2, bg), new Rectangle(tx + dx, top + S(20), tw - dx, S(16)), TfLeft);
+            }
+
+            /// <summary>
+            /// A 16 px line icon, centred in box, drawn like Segoe Fluent's (and the mockup's): the five layers (hdr,
+            /// bright, area, stretch, scaling) and the settings (clock, rec, pause, power, island, update). Drawn rather
+            /// than taken from the icon font, which has no symbol for most of them.
+            /// </summary>
+            void LineIcon(Graphics g, string key, Rectangle box, Color c)
+            {
+                if (key == "island") { IslandIcon(g, box, c); return; }
+                float u = S(16) / 16f, ox = box.X + (box.Width - S(16)) / 2f, oy = box.Y + (box.Height - S(16)) / 2f;
+                Func<float, float, PointF> P_ = (px, py) => new PointF(ox + px * u, oy + py * u);
+                Func<float, float, float, float, RectangleF> R = (x, y, w, h) => new RectangleF(ox + x * u, oy + y * u, w * u, h * u);
+                using (var pen = new Pen(c, Math.Max(1f, 1.3f * u)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+                {
+                    Action<float, float, float, float> line = (x1, y1, x2, y2) => g.DrawLine(pen, P_(x1, y1), P_(x2, y2));
+                    Action<RectangleF, float> box_ = (r, radius) => { using (var p = Theme.Round(r, radius * u)) g.DrawPath(pen, p); };
+                    switch (key)
+                    {
+                        case "hdr":
+                            g.DrawEllipse(pen, R(5, 5, 6, 6));
+                            line(8, 1.5f, 8, 3); line(8, 13, 8, 14.5f); line(1.5f, 8, 3, 8); line(13, 8, 14.5f, 8);
+                            line(3.4f, 3.4f, 4.4f, 4.4f); line(11.6f, 11.6f, 12.6f, 12.6f); line(3.4f, 12.6f, 4.4f, 11.6f); line(11.6f, 4.4f, 12.6f, 3.4f);
+                            break;
+                        case "bright":
+                            g.DrawEllipse(pen, R(2.5f, 2.5f, 11, 11));
+                            using (var b = new SolidBrush(c)) g.FillPie(b, R(2.5f, 2.5f, 11, 11).X, R(2.5f, 2.5f, 11, 11).Y, 11 * u, 11 * u, -90, 180);
+                            break;
+                        case "area":
+                            box_(R(1.5f, 3, 13, 10), 1);
+                            box_(R(4, 5, 8, 6), 0.5f);
+                            break;
+                        case "stretch":
+                            box_(R(1.5f, 3, 13, 10), 1);
+                            line(4.5f, 8, 11.5f, 8);
+                            line(4.5f, 8, 6.1f, 6.4f); line(4.5f, 8, 6.1f, 9.6f); line(11.5f, 8, 9.9f, 6.4f); line(11.5f, 8, 9.9f, 9.6f);
+                            break;
+                        case "scaling":
+                            box_(R(1.5f, 4, 13, 8), 1);
+                            g.DrawEllipse(pen, R(8, 6, 4, 4));
+                            line(4, 7, 6, 7); line(4, 9, 6, 9); line(3, 12, 3, 13.5f); line(6, 12, 6, 13.5f);
+                            break;
+                        case "rec":
+                            box_(R(1.5f, 4, 10, 8), 1);
+                            g.DrawLines(pen, new[] { P_(11.5f, 7), P_(14.5f, 5), P_(14.5f, 11), P_(11.5f, 9) });
+                            break;
+                        case "clock":
+                            g.DrawEllipse(pen, R(2, 2, 12, 12));
+                            g.DrawLines(pen, new[] { P_(8, 4.5f), P_(8, 8), P_(10.5f, 9.5f) });
+                            break;
+                        case "pause":
+                            line(5.5f, 3.5f, 5.5f, 12.5f); line(10.5f, 3.5f, 10.5f, 12.5f);
+                            break;
+                        case "power":
+                            line(8, 2, 8, 8);
+                            g.DrawArc(pen, R(3, 2.87f, 10, 10), 227.2f, -274.4f);
+                            break;
+                        case "update":
+                            line(8, 2, 8, 10);
+                            g.DrawLines(pen, new[] { P_(4.5f, 6.5f), P_(8, 10), P_(11.5f, 6.5f) });
+                            line(2.5f, 13.5f, 13.5f, 13.5f);
+                            break;
+                    }
+                }
             }
 
             /// <summary>The island's symbol, which the icon font hasn't got: a screen with a small pill at its top.</summary>
@@ -1339,28 +1790,20 @@ namespace HdrSwitch
             }
 
             /// <summary>
-            /// HDR's marker in the status card: a small amber dot and "HDR ON" in amber on a faint amber fill – the one
-            /// place amber is used. In SDR a neutral one. In high contrast the words carry it, in an outline.
+            /// HDR's marker on Live's HDR layer: a small amber dot and "ON" in amber on a faint amber fill – the one place
+            /// amber is used. In high contrast the word carries it, in an outline.
             /// </summary>
-            void HdrMark(Graphics g, Rectangle r, double on, Color bg)
+            void HdrMark(Graphics g, Rectangle r, Color bg)
             {
-                double t = Math.Max(0, Math.Min(1, on));
-                bool hdr = t >= 0.5;
                 if (P.HighContrast) Outline(g, r, S(4), P.Text1);
-                else
-                {
-                    Theme.Fill(g, r, S(4), Theme.Fade(P.ControlFill2, 1 - t));
-                    Theme.Fill(g, r, S(4), Theme.Fade(P.HdrSoft, t));
-                }
-                Color under = Palette.Over(hdr ? P.HdrSoft : P.ControlFill2, bg);
-                Color dot = Theme.Mix(P.Ink(P.ControlStrong, bg), P.HdrDot, t);
-                float dx = r.X + S(6) + S(3);
-                if (P.HighContrast && !hdr)
-                    using (var pen = new Pen(P.Text1, 1)) g.DrawEllipse(pen, dx - S(3), r.Y + r.Height / 2f - S(3), S(6), S(6));
-                else Theme.Dot(g, dx, r.Y + r.Height / 2f, S(6), dot);
-                Color fg = hdr ? P.Ink(P.HdrText, under) : P.Ink(P.Text2, under);
-                Draw(g, hdr ? MarkOn : MarkOff, fonts.Label, fg, new Rectangle(r.X + S(6) + S(6) + S(5), r.Y, r.Width - S(23), r.Height), TfLeft);
+                else Theme.Fill(g, r, S(4), P.HdrSoft);
+                Color under = Palette.Over(P.HdrSoft, bg);
+                Theme.Dot(g, r.X + S(6) + S(3), r.Y + r.Height / 2f, S(6), P.HdrDot);
+                Draw(g, MarkOn, fonts.Label, P.Ink(P.HdrText, under), new Rectangle(r.X + S(6) + S(6) + S(5), r.Y, r.Width - S(17), r.Height), TfLeft);
             }
+
+            /// <summary>The marker's width: dot, gap, the word and the padding either side.</summary>
+            int MarkW() { return TextRenderer.MeasureText(MarkOn, fonts.Label, Size.Empty, TfLeft).Width + S(6) + S(6) + S(5) + S(6) + S(2); }
 
             /// <summary>One item of a segmented control: the chosen one raised (ControlFill, an outline, semibold).</summary>
             void Segment(Graphics g, Rectangle rc, Look lk, string text)
@@ -1696,9 +2139,12 @@ namespace HdrSwitch
         }
 
         /// <summary>
-        /// HdrSwitch.exe --render-flyout out.png [--theme dark|light|hc] [--view games|add|res|stretch|bright]
-        /// [--scale 1.5] [--focus key] [--hover key] [--win10]: draws the flyout over made-up state into a PNG and exits,
-        /// so its look can be checked without Windows (under Mono, say). Never part of a normal run.
+        /// HdrSwitch.exe --render-flyout out.png [--theme dark|light|hc] [--tab live|games|settings]
+        /// [--state running|stretch|grace|recording|paused|idle] [--view games|add|res|stretch|bright] [--scale 1.5]
+        /// [--focus key] [--hover key] [--win10] [--no-update]: draws the flyout over made-up state into a PNG and
+        /// exits, so its look can be checked without Windows (under Mono, say). Never part of a normal run. The states:
+        /// running – Counter-Strike 2 with HDR, SDR brightness 40, a competitive area and No scaling; stretch – VALORANT
+        /// stretched over its area; grace – it closed, back to SDR in 2 s; recording – OBS keeps HDR off; paused; idle.
         /// </summary>
         internal static int RenderFlyout(string[] args)
         {
@@ -1735,12 +2181,45 @@ namespace HdrSwitch
             app.profiles["valorant"] = new Resolution.Mode { Width = 2368, Height = 1332 };
             app.stretches["valorant"] = new Resolution.Mode { Width = 1776, Height = 1332 };
             app.brightness["cs2"] = 40;
-            app.running[1] = new Running { Name = "cs2" };
-            app.update = new Updater.Release { Version = new Version(1, 9, 0) };
+            app.update = args.Contains("--no-update") ? null : new Updater.Release { Version = new Version(1, 9, 0) };
             app.islandOn = true;
             app.sdrWhileRecording = false;
             app.sdrDelay = 3;
-            using (var bmp = app.flyout.Render(scale, arg("--view", "games"), "cs2", arg("--focus", null), arg("--hover", null), !args.Contains("--win10")))
+            string state = arg("--state", "running");
+            var display = new Hdr.Display { Gdi = @"\\.\DISPLAY1", Supported = true, On = true };
+            var desktop = new Resolution.Mode { Width = 2560, Height = 1440, Hz = 240 };
+            sample.HdrOn = false;
+            if (state == "running" || state == "grace" || state == "stretch")
+            {
+                bool stretched = state == "stretch";
+                string game = stretched ? "valorant" : "cs2";
+                if (state != "grace") app.running[1] = new Running { Name = game };
+                else sample.Grace = 2;
+                app.owned.Add(display);
+                sample.HdrOn = true;
+                sample.ScreenName = "LG 27GR95QE";
+                app.res = new ActiveMode { Gdi = display.Gdi, Game = game, Back = desktop, ScalingBack = stretched ? -1 : 2,
+                    Mode = stretched ? new Resolution.Mode { Width = 1776, Height = 1332, Hz = 240 } : new Resolution.Mode { Width = 2368, Height = 1332, Hz = 240 },
+                    Area = stretched ? new Resolution.Mode { Width = 2368, Height = 1332, Hz = 240 } : null };
+                if (state == "running") { app.brightBack = Hdr.LevelOf(20); app.brightSet = Hdr.LevelOf(40); }
+            }
+            else if (state == "recording")
+            {
+                app.running[1] = new Running { Name = "cs2" };
+                app.sdrWhileRecording = true;
+                app.recorder = "obs64";
+                sample.ScreenName = "LG 27GR95QE";
+                app.res = new ActiveMode { Gdi = display.Gdi, Game = "cs2", Back = desktop, ScalingBack = 2, Mode = new Resolution.Mode { Width = 2368, Height = 1332, Hz = 240 } };
+            }
+            else if (state == "paused")
+            {
+                app.running[1] = new Running { Name = "cs2" };
+                app.paused = true;
+            }
+            FlyoutTab page;
+            string tabArg = arg("--tab", "games");
+            page = tabArg == "live" ? FlyoutTab.Live : tabArg == "settings" ? FlyoutTab.Settings : FlyoutTab.Games;
+            using (var bmp = app.flyout.Render(scale, page, arg("--view", "games"), "cs2", arg("--focus", null), arg("--hover", null), !args.Contains("--win10")))
                 bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
             Console.WriteLine("Wrote " + path);
             return 0;
