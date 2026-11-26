@@ -29,11 +29,24 @@ git tag v1.2.0
 git push origin main v1.2.0
 ```
 
-GitHub Actions builds the exe, runs the checks and publishes the release; everyone's copy offers the update within a day.
+GitHub Actions builds the exe, runs the checks and publishes the release; everyone's copy offers the update within a day. The tag is the version: it is built into the exe and written into the signed checksum file, so a release can't be moved to another tag afterwards (see below).
 
 ### Signing
 
-**Updates** are signed. The release workflow signs `SHA256SUMS.txt` with the private update key and publishes the signature as `SHA256SUMS.txt.sig`. The app has the public half built in (`Updater.PublicKeyXml`) and only offers and installs a release whose checksum file carries a valid signature. The checksum shows the download arrived intact; the signature shows the checksum file came from the release workflow, not from a file changed or added to the release later. The private key is the `UPDATE_SIGNING_KEY` secret, RSA 3072 in .NET's XML form. Without it the release workflow stops before publishing, because no copy of the app would install that release. Keep a copy of the key somewhere safe: a release signed with a new key is only accepted by copies built with the new public key.
+**Updates** are signed. The release workflow writes `SHA256SUMS.txt` with a version line and the exe's checksum:
+
+```
+# version 1.8.0
+0123…cdef  HdrSwitch.exe
+```
+
+signs it with the private update key and publishes the signature as `SHA256SUMS.txt.sig`. The app has the public half built in (`Updater.PublicKeyXml`). The checksum shows the download arrived intact; the signature shows the checksum file came from the release workflow, not from a file changed or added to the release later; and the signed version line ties the file to its release. The tag isn't signed: without the line, someone able to edit releases (but without the key) could put an old signed build up under a tag like `v99.0.0`, and every copy would "update" to the old build, which would then find that release newer than itself again. The version is the tag without its `v`, as `build.cmd` gets it; `sha256sum -c` passes over the `#` line, and copies from before the line existed still find the exe's line, which is unchanged.
+
+The app checks all of this once a day, before it offers anything, by fetching just `SHA256SUMS.txt` and its signature: the signature must be valid, the file must name a version, that version must be the release's tag and newer than the running copy, and it must have a checksum for the exe. A release that fails is never offered (the reason goes to `%AppData%\HdrSwitch\error.log`). Installing downloads all three files and checks everything again, the exe against its checksum as well, since a release's files can change between the check and the click. Releases signed before the version line existed don't carry it, so this copy never accepts them; that costs nothing, because it only ever looks at releases newer than itself, and those all carry the line.
+
+Swapping in the new exe: the running exe is renamed to `HdrSwitch.old.exe`, the new one takes its name and starts with `--updated`, and the old copy exits. If the new exe can't take the name, the old one is put back (renamed, or copied if it can't be renamed) and the update reports the original error; whatever fails is logged. If the new exe is in place but won't start, the app says **Restart to finish** and the old copy keeps running until then.
+
+An update waits while a game the app follows is running, while the countdown back to SDR or the saved resolution runs, and while Steam is starting a game. The copy that exits puts back everything it switched, so updating mid-game would turn HDR off and the resolution back under the game, and a game that only looks for HDR as it starts wouldn't get it back from the new copy. A click during a game downloads and checks the update right away and swaps it in once that is over. The private key is the `UPDATE_SIGNING_KEY` secret, RSA 3072 in .NET's XML form. Without it the release workflow stops before publishing, because no copy of the app would install that release. Keep a copy of the key somewhere safe: a release signed with a new key is only accepted by copies built with the new public key.
 
 To protect the key further, put the release job in a GitHub *environment* with required reviewers and keep the secret there; then only an approved tag push can sign.
 

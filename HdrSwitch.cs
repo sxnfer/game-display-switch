@@ -147,7 +147,11 @@ namespace HdrSwitch
         bool updating;
         string updateStep;        // while updating: the step under way, shown on the update button
         string updateError;       // why the last update didn't install
+        byte[] updateExe;         // downloaded and checked, waiting to be swapped in once no game needs the displays
+        bool restarting;          // "Restarting" is showing; the swap follows
+        bool updateInstalled;     // swapped in but not started: it runs from the next start, so stop looking
         const string UpdateFailed = "Update failed";
+        const string UpdateWaits = "After the game";   // the update button while a game holds the update back
         const int StepMs = 700;   // each update step stays on the button at least this long
 
         // Recording apps (process name → name shown). An HDR game captured into an SDR recording comes out washed out,
@@ -192,7 +196,7 @@ namespace HdrSwitch
 
             sdrTimer.Interval = sdrDelay * 1000;
             sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); Settle(); };
-            scanTimer.Tick += (s, e) => { Rescan(); FollowGameScreens(); island.Poll(); };
+            scanTimer.Tick += (s, e) => { Rescan(); FollowGameScreens(); island.Poll(); if (updateExe != null) FinishUpdate(); };
             steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); Settle(); };
             reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); LoadRecorders(); LoadBrightness(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
             modeCheck.Tick += (s, e) => { modeCheck.Stop(); OnDisplayChanged(false); };
@@ -256,7 +260,7 @@ namespace HdrSwitch
 
         void CheckForUpdate()
         {
-            if (update != null || updating) return;
+            if (update != null || updating || updateInstalled) return;
             new Thread(() =>
             {
                 Updater.Release r = null;
@@ -294,28 +298,94 @@ namespace HdrSwitch
                     if (s != null) ui.Post(_ => { updateStep = s; flyout.Sync(); }, null);
                 };
                 string error = null;
-                try { Updater.Install(r, step); }
+                byte[] exe = null;
+                try { exe = Updater.Download(r, step); }
                 catch (Exception e) { error = e.Message; }
-                step(null);   // what shows stays up for its moment too: "Restarting" (the new copy waits for this one to exit), or the step that failed
+                step(null);   // "Verifying", or the step that failed, stays up for its moment too
                 ui.Post(_ =>
                 {
-                    if (error == null) { ExitThread(); return; }   // the new version is starting
-                    // The button says so for a moment before it opens up again with the reason underneath.
-                    updateStep = UpdateFailed;
-                    flyout.Sync();
-                    Announce(new Island.Act { Id = "update", Text = "Update failed", Dot = Theme.Rec, Balloon = "Update failed: " + error });
-                    var back = new System.Windows.Forms.Timer { Interval = 1400 };
-                    back.Tick += (s2, e2) =>
-                    {
-                        back.Dispose();
-                        updating = false;
-                        updateStep = null;
-                        updateError = error;   // the flyout shows the reason under the update button
-                        flyout.Sync();
-                    };
-                    back.Start();
+                    if (error != null) { UpdateFailedWith(error); return; }
+                    updateExe = exe;
+                    FinishUpdate();
                 }, null);
             }) { IsBackground = true }.Start();
+        }
+
+        /// <summary>
+        /// An update restarts the app, and the copy that exits puts back what it switched: HDR off, the saved resolution –
+        /// in the middle of a game, and a game that only looks for HDR as it starts would not get it back. So the swap
+        /// waits while a followed game runs, while the countdown back to SDR runs, and while Steam is starting a game.
+        /// </summary>
+        internal static bool UpdateMustWait(int gamesRunning, bool countingDown, bool steamStarting)
+        {
+            return gamesRunning > 0 || countingDown || steamStarting;
+        }
+
+        /// <summary>Swaps in the checked update once nothing holds it back – from the scan timer while something does.</summary>
+        void FinishUpdate()
+        {
+            if (updateExe == null || restarting) return;
+            if (UpdateMustWait(running.Count, sdrTimer.Enabled, steamTimeout.Enabled))
+            {
+                if (updateStep != UpdateWaits) { updateStep = UpdateWaits; flyout.Sync(); }
+                return;
+            }
+            restarting = true;
+            updateStep = "Restarting";
+            flyout.Sync();
+            var t = new System.Windows.Forms.Timer { Interval = StepMs };   // "Restarting" stays up for its moment
+            t.Tick += (s, e) =>
+            {
+                t.Dispose();
+                restarting = false;
+                // A game may have started in that moment.
+                if (UpdateMustWait(running.Count, sdrTimer.Enabled, steamTimeout.Enabled)) { FinishUpdate(); return; }
+                byte[] exe = updateExe;
+                updateExe = null;
+                bool started;
+                try { started = Updater.Swap(exe); }
+                catch (Exception ex) { UpdateFailedWith(ex.Message); return; }
+                if (started) { ExitThread(); return; }   // the new version waits for this copy to exit
+                // In place, but it didn't start: this copy carries on, and the new one runs from the next start.
+                updateInstalled = true;
+                updating = false;
+                updateStep = null;
+                var v = update.VersionText;
+                update = null;
+                flyout.Sync();
+                Announce(new Island.Act { Id = "update", Text = "Restart to finish", Title = "Updated to " + v, Sub = "Restart Display Switch to finish",
+                    Balloon = "Updated to " + v + " – restart Display Switch to finish." });
+            };
+            t.Start();
+        }
+
+        void UpdateFailedWith(string error)
+        {
+            // The button says so for a moment before it opens up again with the reason underneath.
+            updateStep = UpdateFailed;
+            flyout.Sync();
+            Announce(new Island.Act { Id = "update", Text = "Update failed", Dot = Theme.Rec, Balloon = "Update failed: " + error });
+            var back = new System.Windows.Forms.Timer { Interval = 1400 };
+            back.Tick += (s2, e2) =>
+            {
+                back.Dispose();
+                updating = false;
+                updateStep = null;
+                updateError = error;   // the flyout shows the reason under the update button
+                flyout.Sync();
+            };
+            back.Start();
+        }
+
+        /// <summary>The line under the update button: why the last try failed, or what it is waiting for.</summary>
+        internal string UpdateNote
+        {
+            get
+            {
+                if (updateError != null) return "Update failed: " + updateError;
+                if (updating && updateStep == UpdateWaits) return "Downloaded and checked. It installs once the game has closed and the display is back.";
+                return null;
+            }
         }
 
         // ---- game tracking ----
@@ -1947,6 +2017,10 @@ namespace HdrSwitch
     /// that file is only believed if SHA256SUMS.txt.sig is its signature by the project's update key. The checksum
     /// alone shows the download arrived intact; the signature shows SHA256SUMS.txt came from the release workflow,
     /// which holds the key as a secret, and not from a file changed or added to the release afterwards.
+    /// The signed file also names the version it was built as ("# version 1.2.3"), and that must be the release's
+    /// tag: the tag itself isn't signed, so without it an old signed build could be put up under a newer tag – every
+    /// copy would "update" to the old build, which would then find the same release newer than itself, again and again.
+    /// The check runs before a release is offered (SHA256SUMS.txt and its signature are small) and again on install.
     /// Install: the running exe is renamed to HdrSwitch.old.exe (Windows allows that), the new one takes its name
     /// and is started with --updated; it waits for this copy to exit and removes the old file.
     /// </summary>
@@ -1977,13 +2051,30 @@ namespace HdrSwitch
         /// <summary>Dev builds (0.0.0, built without a version) never update themselves.</summary>
         public static bool Enabled { get { return Current > new Version(0, 0, 0); } }
 
-        /// <summary>The latest release if it is newer than this copy, otherwise null.</summary>
+        /// <summary>The latest release if it is newer than this copy and its signed checksum file vouches for it, otherwise null.</summary>
         public static Release Latest()
         {
             string json;
             try { using (var web = Client()) json = web.DownloadString("https://api.github.com/repos/" + Repo + "/releases/latest"); }
             catch (System.Net.WebException) { using (var web = Client()) json = web.DownloadString("https://api.github.com/repos/" + OldRepo + "/releases/latest"); }
-            return Parse(json, Current);
+            using (var web = Client()) return Offer(json, Current, web.DownloadData, PublicKeyXml);
+        }
+
+        /// <summary>
+        /// The release to offer: newer than current, with all three files, and SHA256SUMS.txt (fetched with download,
+        /// together with its signature) signed by the key and naming the tag's version. Otherwise null, and why goes to
+        /// the log – a release that fails here would only fail again at "Verifying".
+        /// </summary>
+        internal static Release Offer(string json, Version current, Func<string, byte[]> download, string publicKeyXml)
+        {
+            var r = Parse(json, current);
+            if (r == null) return null;
+            byte[] sums = download(r.SumsUrl);
+            string sig = Encoding.ASCII.GetString(download(r.SigUrl));
+            string problem = Problem(r, sums, sig, publicKeyXml, current);
+            if (problem == null) return r;
+            Guard.Log("Update to " + r.VersionText + " not offered: " + problem);
+            return null;
         }
 
         /// <summary>The release in GitHub's JSON if it is newer than current and has both files, otherwise null.</summary>
@@ -2011,34 +2102,82 @@ namespace HdrSwitch
         }
 
         /// <summary>
-        /// Downloads, checks and swaps in the new exe, then starts it. Throws with a short reason on failure.
-        /// step: told when it moves on to the next step ("Verifying", "Restarting"), for the update button.
+        /// Downloads the release and checks it all over again (the files may have changed since it was offered):
+        /// the signature, the signed version, and the exe against its checksum. Returns the exe; nothing is written.
+        /// Throws with a short reason on failure. step: told when it moves on to "Verifying", for the update button.
         /// </summary>
-        public static void Install(Release r, Action<string> step)
+        public static byte[] Download(Release r, Action<string> step)
         {
-            string exe = Application.ExecutablePath;
-            string dir = Path.GetDirectoryName(exe);
-            string fresh = Path.Combine(dir, "HdrSwitch.new.exe"), old = Path.Combine(dir, "HdrSwitch.old.exe");
-
-            byte[] bytes, sumsRaw;
+            byte[] bytes, sums;
             string sig;
             using (var web = Client())
             {
-                sumsRaw = web.DownloadData(r.SumsUrl);
+                sums = web.DownloadData(r.SumsUrl);
                 sig = Encoding.ASCII.GetString(web.DownloadData(r.SigUrl));
                 bytes = web.DownloadData(r.ExeUrl);
             }
             step("Verifying");
+            return Checked(r, sums, sig, bytes, PublicKeyXml, Current);
+        }
 
-            if (!Verified(sumsRaw, sig, PublicKeyXml)) throw new Exception("the release's signature doesn't match – nothing was changed.");
-            string sums = Encoding.ASCII.GetString(sumsRaw);
-
-            string expected = ExpectedHash(sums);
-            if (expected == null) throw new Exception("the release has no checksum for " + ExeName + ".");
+        /// <summary>The exe if the checksum file vouches for this release and the exe matches it; otherwise throws why.</summary>
+        internal static byte[] Checked(Release r, byte[] sums, string sig, byte[] exe, string publicKeyXml, Version current)
+        {
+            string problem = Problem(r, sums, sig, publicKeyXml, current);
+            if (problem != null) throw new Exception(problem + " – nothing was changed.");
             string actual;
             using (var sha = System.Security.Cryptography.SHA256.Create())
-                actual = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
-            if (actual != expected) throw new Exception("the download doesn't match its checksum – nothing was changed.");
+                actual = BitConverter.ToString(sha.ComputeHash(exe)).Replace("-", "").ToLowerInvariant();
+            if (actual != ExpectedHash(Encoding.ASCII.GetString(sums))) throw new Exception("the download doesn't match its checksum – nothing was changed.");
+            return exe;
+        }
+
+        /// <summary>
+        /// Why a release's checksum file can't be believed, or null if it can: it must carry a valid signature by the
+        /// key, name a version, that version must be the release's tag and newer than current, and it must have the exe's checksum.
+        /// </summary>
+        internal static string Problem(Release r, byte[] sums, string sig, string publicKeyXml, Version current)
+        {
+            if (!Verified(sums, sig, publicKeyXml)) return "the release's signature doesn't match";
+            string text = Encoding.ASCII.GetString(sums);
+            Version signed = SignedVersion(text);
+            if (signed == null) return "the release's checksum file doesn't say which version it is";
+            if (signed != r.Version) return "the release is tagged " + r.VersionText + " but was built as " + Text(signed);
+            if (signed <= current) return "the release isn't newer than " + Text(current);
+            if (ExpectedHash(text) == null) return "the release has no checksum for " + ExeName;
+            return null;
+        }
+
+        /// <summary>
+        /// The version a checksum file was signed for, from its "# version 1.2.3" line (sha256sum -c passes over lines
+        /// that start with #), or null: no such line, one that isn't a version, or more than one.
+        /// </summary>
+        internal static Version SignedVersion(string sums)
+        {
+            Version found = null;
+            foreach (string raw in (sums ?? "").Split('\n'))
+            {
+                string l = raw.Trim();
+                if (!l.StartsWith("#")) continue;
+                string[] parts = l.Substring(1).Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0 || parts[0] != "version") continue;   // some other comment
+                Version v;
+                if (found != null || parts.Length != 2 || !Version.TryParse(parts[1], out v)) return null;   // trust neither of two
+                found = ThreeParts(v);
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// Puts the checked exe in place of the running one and starts it with --updated. True: the new version is
+        /// starting. False: it is in place but didn't start – it runs from the next start. Throws with a short reason if
+        /// it couldn't be put in place; the running version is then back under its own name, or the log says why not.
+        /// </summary>
+        public static bool Swap(byte[] bytes)
+        {
+            string exe = Application.ExecutablePath;
+            string dir = Path.GetDirectoryName(exe);
+            string fresh = Path.Combine(dir, "HdrSwitch.new.exe"), old = Path.Combine(dir, "HdrSwitch.old.exe");
 
             try
             {
@@ -2051,10 +2190,33 @@ namespace HdrSwitch
                 throw new Exception("no permission to write to " + dir + ".");
             }
             try { File.Move(fresh, exe); }
-            catch { File.Move(old, exe); throw; }   // put the running version back
+            catch (Exception e)
+            {
+                Guard.Log("Update: putting the new version in place", e);
+                if (PutBack(old, exe)) throw;
+                throw new Exception(e.Message + " " + ExeName + " couldn't be put back either: rename HdrSwitch.old.exe to " + ExeName + ".", e);
+            }
 
-            step("Restarting");
-            Process.Start(new ProcessStartInfo(exe, "--updated") { UseShellExecute = false, WorkingDirectory = dir });
+            try
+            {
+                Process.Start(new ProcessStartInfo(exe, "--updated") { UseShellExecute = false, WorkingDirectory = dir });
+                return true;
+            }
+            catch (Exception e)
+            {
+                Guard.Log("Update: starting the new version", e);
+                return false;
+            }
+        }
+
+        /// <summary>After a failed swap: the running version back under its own name, so the sign-in start finds it.</summary>
+        static bool PutBack(string old, string exe)
+        {
+            try { File.Move(old, exe); return true; }
+            catch (Exception e) { Guard.Log("Update: moving the running version back", e); }
+            try { File.Copy(old, exe, true); return true; }   // the running exe can't move, but it can still be read
+            catch (Exception e) { Guard.Log("Update: copying the running version back", e); }
+            return false;
         }
 
         /// <summary>
@@ -2069,6 +2231,7 @@ namespace HdrSwitch
             try
             {
                 byte[] s = Convert.FromBase64String((sig ?? "").Trim());
+                if (s.Length == 0) return false;
                 using (var rsa = new System.Security.Cryptography.RSACryptoServiceProvider())
                 {
                     rsa.PersistKeyInCsp = false;

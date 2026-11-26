@@ -483,7 +483,7 @@ namespace HdrSwitch
                 bool on;
                 Status(out title, out sub, out on);
                 bool hasUpdate = app.update != null;
-                string notice = app.notice, error = hasUpdate && app.updateError != null ? "Update failed: " + app.updateError : null;
+                string notice = app.notice, error = hasUpdate ? app.UpdateNote : null;   // why it failed, or what it waits for
                 int textW = W - 2 * M - 2 * CP;
                 int noticeH = notice == null ? 0 : TextRenderer.MeasureText(notice, fonts.Caption, new Size(textW, 2000), TfWrap).Height;
                 int errorH = error == null ? 0 : TextRenderer.MeasureText(error, fonts.Caption, new Size(textW, 2000), TfWrap).Height;
@@ -508,16 +508,16 @@ namespace HdrSwitch
                 {
                     // White and full-width while it waits for a click. Once clicked it turns dark and shrinks around a
                     // spinner, its label rolling through the steps of the update; a failure says so with a nudge, then
-                    // it opens up again with the reason underneath.
-                    bool busy = app.updating, failed = app.updateStep == UpdateFailed;
+                    // it opens up again with the reason underneath. Held back by a game it keeps its label, without the spinner.
+                    bool busy = app.updating, failed = app.updateStep == UpdateFailed, waits = app.updateStep == UpdateWaits;
                     string label = busy ? app.updateStep ?? "Downloading" : "Update to " + app.update.VersionText;
                     var ur = new Rectangle(c1.X + CP, c1.Y + updateY, c1.Width - 2 * CP, S(36));
                     RollText roll = Roll("update", label, fonts.Strong);
                     int spin = S(16), gap = S(8);
-                    float fit = !busy ? ur.Width : (failed ? S(18) : S(12) + spin + gap) + roll.TargetWidth + S(18);
+                    float fit = !busy ? ur.Width : (failed || waits ? S(18) : S(12) + spin + gap) + roll.TargetWidth + S(18);
                     items.Add(new Item
                     {
-                        Name = label, Rect = ur, Key = "update", On = busy, Busy = busy && !failed, Width = Math.Min(ur.Width, fit), Shake = failed, InCard = true,
+                        Name = label, Rect = ur, Key = "update", On = busy, Busy = busy && !failed && !waits, Width = Math.Min(ur.Width, fit), Shake = failed, InCard = true,
                         Click = busy ? null : (Action)(() => { app.InstallUpdate(); Rebuild(); }),
                         Paint = (g, rc, lk) =>
                         {
