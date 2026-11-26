@@ -1,4 +1,4 @@
-// The glass that the island and the flyout are made of. Analogy: a frosted shower window. The colours and shapes
+// The glass that the island is made of (the flyout is a solid Windows 11 flyout since: Palette.cs). Analogy: a frosted shower window. The colours and shapes
 // behind it come through, the detail does not, and light catches its edge. Five layers, from the back to the front:
 //
 //  1. What is behind: the desktop or a game. The app never reads these pixels.
@@ -10,11 +10,6 @@
 //
 // The window's own alpha (a fade in or out) does not fade the blur, so the blur comes on half-way through a fade in
 // and goes half-way through a fade out. With "Transparency effects" off in Windows there is no blur and the veil is solid.
-//
-// Text: GDI text (TextRenderer) writes no alpha, so on a transparent surface it would make holes. Here it is drawn
-// white on black into a small bitmap, that bitmap becomes a coverage mask, and the mask is drawn in the text's colour.
-// That keeps exactly the sizes TextRenderer measures, which the flyout's layout and Roll.cs use. Masks are kept, so a
-// frame only copies them.
 
 using System;
 using System.Collections.Generic;
@@ -159,117 +154,6 @@ namespace HdrSwitch
                 };
                 using (var pen = new Pen(b, 1f))
                 using (var p = Theme.Round(RectangleF.Inflate(r, -0.5f, -0.5f), Math.Max(0, radius - 0.5f))) g.DrawPath(pen, p);
-            }
-        }
-
-        /// <summary>A card on the glass: a little white, with light on its top edge.</summary>
-        public static void Chip(Graphics g, RectangleF r, float radius, Color fill)
-        {
-            Theme.Fill(g, r, radius, fill);
-            Edge(g, r, radius, 1);
-        }
-
-        /// <summary>The light on the top edge of something that sits on the glass. strength 0 → 1.</summary>
-        public static void Edge(Graphics g, RectangleF r, float radius, double strength)
-        {
-            strength = Math.Max(0, Math.Min(1, strength));
-            if (strength < 0.01 || r.Width < 2 || r.Height < 2) return;
-            using (var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height + 2), W((int)(60 * strength)), W((int)(8 * strength)), 90f))
-            using (var pen = new Pen(b, 1f))
-            using (var p = Theme.Round(RectangleF.Inflate(r, -0.5f, -0.5f), Math.Max(0, radius - 0.5f))) g.DrawPath(pen, p);
-        }
-
-        // ---- text ----
-
-        const int Pad = 2;   // room round a mask for anti-aliasing that spills past the measured box
-        static readonly Dictionary<string, Bitmap> masks = new Dictionary<string, Bitmap>();
-
-        /// <summary>TextRenderer.DrawText in a box, with real alpha. Light text gets a faint shadow, so it reads on a bright backdrop.</summary>
-        public static void Text(Graphics g, string s, Font f, Rectangle r, Color c, TextFormatFlags flags)
-        {
-            if (string.IsNullOrEmpty(s) || c.A == 0 || r.Width <= 0 || r.Height <= 0) return;
-            Blit(g, Mask(s, f, r.Size, flags), r.X - Pad, r.Y - Pad, c);
-        }
-
-        /// <summary>TextRenderer.DrawText from a point, with real alpha.</summary>
-        public static void TextAt(Graphics g, string s, Font f, Point at, Color c, TextFormatFlags flags)
-        {
-            if (string.IsNullOrEmpty(s) || c.A == 0) return;
-            Blit(g, Mask(s, f, Size.Empty, flags), at.X - Pad, at.Y - Pad, c);
-        }
-
-        /// <summary>Lets the kept masks go: the flyout closed.</summary>
-        public static void ClearText()
-        {
-            foreach (var m in masks.Values) m.Dispose();
-            masks.Clear();
-        }
-
-        /// <summary>White where the text is, with its coverage as alpha. box empty: measured from a point.</summary>
-        static Bitmap Mask(string s, Font f, Size box, TextFormatFlags flags)
-        {
-            string key = s + "\u0001" + f.Name + "\u0001" + f.Size + "\u0001" + (int)f.Style + "\u0001" + box.Width + "x" + box.Height + "\u0001" + (int)flags;
-            Bitmap m;
-            if (masks.TryGetValue(key, out m)) return m;
-            if (masks.Count > 600) ClearText();
-            bool atPoint = box.IsEmpty;
-            Size sz = atPoint ? TextRenderer.MeasureText(s, f, Size.Empty, flags) : box;
-            int w = Math.Max(1, sz.Width + 2 * Pad), h = Math.Max(1, sz.Height + 2 * Pad);
-            var all = new Rectangle(0, 0, w, h);
-            m = new Bitmap(w, h, PixelFormat.Format32bppArgb);
-            using (var src = new Bitmap(w, h, PixelFormat.Format32bppRgb))
-            {
-                using (var sg = Graphics.FromImage(src))
-                {
-                    sg.Clear(Color.Black);
-                    sg.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;   // asks TextRenderer for grey anti-aliasing
-                    if (atPoint) TextRenderer.DrawText(sg, s, f, new Point(Pad, Pad), Color.White, Color.Black, flags);
-                    else TextRenderer.DrawText(sg, s, f, new Rectangle(Pad, Pad, box.Width, box.Height), Color.White, Color.Black, flags);
-                }
-                var a = src.LockBits(all, ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
-                var b = m.LockBits(all, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-                int n = a.Stride * h;
-                var px = new byte[n];
-                Marshal.Copy(a.Scan0, px, 0, n);
-                for (int i = 0; i < n; i += 4)
-                {
-                    int cov = (px[i] + px[i + 1] + px[i + 2]) / 3;   // grey text has equal channels; ClearType's coloured edges average out
-                    px[i] = px[i + 1] = px[i + 2] = 255;
-                    px[i + 3] = (byte)cov;
-                }
-                Marshal.Copy(px, 0, b.Scan0, n);
-                src.UnlockBits(a);
-                m.UnlockBits(b);
-            }
-            masks[key] = m;
-            return m;
-        }
-
-        static void Blit(Graphics g, Bitmap mask, int x, int y, Color c)
-        {
-            var mode = g.InterpolationMode;
-            g.InterpolationMode = InterpolationMode.NearestNeighbor;   // 1:1, so an exact copy
-            double lum = (0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B) / 255;
-            double shadow = 0.32 * Math.Max(0, Math.Min(1, (lum - 0.45) / 0.35));   // light text only: none on white glass
-            if (shadow > 0.01) Tinted(g, mask, x, y + 1, Color.FromArgb((int)Math.Round(c.A * shadow), 0, 0, 0));
-            Tinted(g, mask, x, y, c);
-            g.InterpolationMode = mode;
-        }
-
-        static void Tinted(Graphics g, Bitmap mask, int x, int y, Color c)
-        {
-            var cm = new ColorMatrix(new[]
-            {
-                new[] { c.R / 255f, 0, 0, 0, 0 },
-                new[] { 0, c.G / 255f, 0, 0, 0 },
-                new[] { 0, 0, c.B / 255f, 0, 0 },
-                new[] { 0, 0, 0, c.A / 255f, 0 },
-                new[] { 0f, 0, 0, 0, 1 }
-            });
-            using (var ia = new ImageAttributes())
-            {
-                ia.SetColorMatrix(cm);
-                g.DrawImage(mask, new Rectangle(x, y, mask.Width, mask.Height), 0, 0, mask.Width, mask.Height, GraphicsUnit.Pixel, ia);
             }
         }
     }
