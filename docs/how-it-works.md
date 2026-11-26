@@ -31,6 +31,8 @@ git push origin main v1.2.0
 
 GitHub Actions builds the exe, runs the checks and publishes the release; everyone's copy offers the update within a day. The tag is the version: it is built into the exe and written into the signed checksum file, so a release can't be moved to another tag afterwards (see below).
 
+A release tag is `v` and three numbers, like `v1.2.3` (the exe's version is those numbers plus `.0`), and it must point at a commit on `main`. The release workflow checks both before it builds anything and stops otherwise, so a tag on another branch, or a name like `v1.2` or `v1.2.3-beta`, never becomes a signed release. Two tags pushed together are released one after the other, not at once.
+
 ### Signing
 
 **Updates** are signed. The release workflow writes `SHA256SUMS.txt` with a version line and the exe's checksum:
@@ -48,7 +50,9 @@ Swapping in the new exe: the running exe is renamed to `HdrSwitch.old.exe`, the 
 
 An update waits while a game the app follows is running, while the countdown back to SDR or the saved resolution runs, and while Steam is starting a game. The copy that exits puts back everything it switched, so updating mid-game would turn HDR off and the resolution back under the game, and a game that only looks for HDR as it starts wouldn't get it back from the new copy. A click during a game downloads and checks the update right away and swaps it in once that is over. The private key is the `UPDATE_SIGNING_KEY` secret, RSA 3072 in .NET's XML form. Without it the release workflow stops before publishing, because no copy of the app would install that release. Keep a copy of the key somewhere safe: a release signed with a new key is only accepted by copies built with the new public key.
 
-To protect the key further, put the release job in a GitHub *environment* with required reviewers and keep the secret there; then only an approved tag push can sign.
+The workflow runs in three jobs so the keys never share a job with the repository's own code. `build` checks the tag, builds and runs the checks, with a read-only token and no secrets. `sign` checks out nothing and runs no file from the repository: it takes the exe `build` made, code-signs it (below), writes `SHA256SUMS.txt` and signs it; only this job sees `UPDATE_SIGNING_KEY` and the certificate, and its token has no permissions. `publish` creates the release from those files; it is the only job that can write to the repository, and it has no secrets. A change to the build, the checks or the app's code therefore can't read the key, only change the exe that gets signed, which is what review on `main` is for. The actions the workflows use are pinned to commit SHAs, so a moved tag in someone else's repository can't change what runs next to the key.
 
-**The exe** can be code-signed too (Authenticode). Windows then shows the publisher instead of "Windows protected your PC". The release workflow does this when the `SIGNING_CERT_PFX` (the certificate as base64) and `SIGNING_CERT_PASSWORD` secrets exist. A certificate comes from a certificate authority, from [SignPath Foundation](https://signpath.org) (free for open-source projects, after an application), or from Azure Trusted Signing. SmartScreen's warning only goes away once a signed exe has built up reputation.
+To protect the key further, put the `sign` job in a GitHub *environment* with required reviewers (add `environment: <name>` to it) and keep the secrets there; then only an approved tag push can sign.
+
+**The exe** can be code-signed too (Authenticode). Windows then shows the publisher instead of "Windows protected your PC". The release workflow does this, in the `sign` job and before the checksum is taken, when the `SIGNING_CERT_PFX` (the certificate as base64) and `SIGNING_CERT_PASSWORD` secrets exist. A certificate comes from a certificate authority, from [SignPath Foundation](https://signpath.org) (free for open-source projects, after an application), or from Azure Trusted Signing. SmartScreen's warning only goes away once a signed exe has built up reputation.
 
