@@ -59,6 +59,7 @@ namespace HdrSwitch
                 public string Name;    // what a screen reader says (the tooltip when not set)
                 public AccessibleRole Role = AccessibleRole.PushButton;
                 public bool Selected;  // a switch that is on, the chosen row: "checked" for a screen reader
+                public bool Listed;    // kept for the keyboard and screen readers while it can't be clicked: a busy button says its step
             }
 
             readonly TrayApp app;
@@ -71,6 +72,7 @@ namespace HdrSwitch
             readonly TextFormatFlags TfLeft, TfCenter, TfCaption, TfWrap;   // TfCaption: right-aligned, never shortened
             Rectangle listClip;
             Glass.Surface surface;   // what UpdateLayeredWindow shows; kept while the flyout is open
+            Size shaped;             // the size the window's region was last cut to
             bool queued, blurOn;
             double fade = 1;         // the window's alpha: 0 → 1 as it opens
             int scroll, scrollMax, rowH;
@@ -82,6 +84,12 @@ namespace HdrSwitch
             string choosing;  // the list shows the resolutions for this game, instead of the games
             bool stretching;  // choosing: the list shows the game's own resolutions, to stretch over its competitive one
             bool brightening; // choosing: the list shows the SDR brightness levels for the game
+            readonly FlyoutTrail trail = new FlyoutTrail();   // where each open view was entered from: back returns there
+            bool entered;         // a view was just entered: the keyboard starts on its first row
+            bool returned;        // just back from a view: the keyboard is on the control that opened it
+            bool repeat;          // the key being handled is held down (auto-repeat): it moves, but never presses
+            int wheel;            // what the wheel moved that is less than a pixel, kept for its next turn
+            string screenName;    // the monitor it opened on: it stays there until it closes
             readonly Spring open = Motion.Open(0);           // 0 hidden → 1 in place: slide and fade
             readonly Spring scrollTo = Motion.Scroll(0);     // the wheel moves its target, the list follows
             readonly Spring thumb = Motion.Fade(0);          // the scroll bar: there while scrolling, gone 0.8 s later
@@ -134,9 +142,14 @@ namespace HdrSwitch
                 choosing = null;
                 stretching = false;
                 brightening = false;
+                trail.Clear();
+                entered = returned = false;
+                wheel = 0;
                 Motion.Refresh();
                 Glass.Refresh();
-                float scale = Theme.Scale(Cursor.Position);
+                var at = Cursor.Position;
+                screenName = Screen.FromPoint(at).DeviceName;
+                float scale = Theme.Scale(at);
                 if (fonts == null || scale != k)
                 {
                     if (fonts != null) fonts.Dispose();
@@ -227,16 +240,20 @@ namespace HdrSwitch
             /// <summary>Where it sits when open: in the corner by the taskbar, 12 px in, like the system flyouts.</summary>
             Point Corner(out Point slideFrom)
             {
-                var scr = Screen.FromPoint(Cursor.Position);
-                var wa = scr.WorkingArea;
-                var b = scr.Bounds;
-                int m = S(12), d = S(24);
-                int x = wa.Right - m - Width, y = wa.Bottom - m - Height;
-                slideFrom = new Point(0, d);                                          // taskbar at the bottom
-                if (wa.Top > b.Top) { y = wa.Top + m; slideFrom = new Point(0, -d); }   // at the top
-                else if (wa.Left > b.Left) { x = wa.Left + m; slideFrom = new Point(-d, 0); }
-                else if (wa.Right < b.Right) slideFrom = new Point(d, 0);
-                return new Point(x, y);
+                var scr = Where();
+                return FlyoutCorner(scr.WorkingArea, scr.Bounds, Size, S(12), S(24), out slideFrom);
+            }
+
+            /// <summary>
+            /// The monitor it opened on, read afresh (the taskbar may have moved). Not the one under the mouse: moving the
+            /// mouse to another monitor while it is open must not carry it there at this monitor's scale.
+            /// </summary>
+            Screen Where()
+            {
+                var all = Screen.AllScreens;
+                var cursor = Screen.FromPoint(Cursor.Position);
+                string name = FlyoutScreen(screenName, all.Select(s => s.DeviceName).ToList(), cursor.DeviceName);
+                return all.FirstOrDefault(s => s.DeviceName == name) ?? cursor;
             }
 
             /// <summary>Something changed while it is open (a game started, a scan finished…).</summary>
@@ -256,18 +273,28 @@ namespace HdrSwitch
                 if (Visible && !closing) Dismiss(false);
             }
 
+            /// <summary>Every key passes here first: notes whether it is held down, which Windows marks in bit 30.</summary>
+            public override bool PreProcessMessage(ref Message msg)
+            {
+                if (msg.Msg == 0x100) repeat = (msg.LParam.ToInt64() & 0x40000000) != 0;   // WM_KEYDOWN: the key was already down
+                return base.PreProcessMessage(ref msg);
+            }
+
             protected override bool ProcessDialogKey(Keys keyData)
             {
                 switch (keyData)
                 {
-                    case Keys.Escape: Dismiss(false); return true;
+                    // Esc goes back a view first, and closes from the games list. Held down, it stops at the first.
+                    case Keys.Escape:
+                        if (repeat) return true;
+                        if (Depth() > 0) Do(GoBack); else Dismiss(false);
+                        return true;
                     case Keys.Tab: case Keys.Down: case Keys.Right: MoveFocus(1); return true;
                     case Keys.Shift | Keys.Tab: case Keys.Up: case Keys.Left: MoveFocus(-1); return true;
                     case Keys.Home: MoveFocus(0); return true;
                     case Keys.Enter: Press(); return true;
                     case Keys.Back:
-                        int back = items.FindIndex(it => it.Key == "back");
-                        if (back >= 0) Do(items[back].Click);
+                        if (!repeat && Depth() > 0) Do(GoBack);
                         return true;
                 }
                 return base.ProcessDialogKey(keyData);
@@ -281,7 +308,7 @@ namespace HdrSwitch
 
             // ---- keyboard ----
 
-            bool Focusable(int i) { return i >= 0 && i < items.Count && items[i].Click != null && !closing; }
+            bool Focusable(int i) { return i >= 0 && i < items.Count && (items[i].Click != null || items[i].Listed) && !closing; }
 
             /// <summary>To the next (1) or previous (-1) control, round and round; 0: the first one.</summary>
             void MoveFocus(int dir)
@@ -305,11 +332,58 @@ namespace HdrSwitch
                 if (child >= 0) AccessibilityNotifyClients(AccessibleEvents.Focus, child);
             }
 
+            /// <summary>
+            /// Enter or Space. After the mouse took over the ring is hidden, so the first press only shows where the
+            /// keyboard is; a held key presses once, not with every repeat (a switch would flip on and off).
+            /// </summary>
             void Press()
             {
-                if (!Focusable(focus)) return;
-                keyboard = true;
-                Do(items[focus].Click);
+                switch (FlyoutKeyAction(keyboard, repeat, Focusable(focus)))
+                {
+                    case FlyoutKey.Ring: SetFocus(focus); break;
+                    case FlyoutKey.Click:
+                        var click = items[focus].Click;   // null: a busy button, which has nothing to do yet
+                        if (click != null) Do(click);
+                        break;
+                }
+            }
+
+            /// <summary>How many views deep it is: 0 the games list, 1 a game's resolutions or the programs to add, 2 below those.</summary>
+            int Depth() { return picking ? 1 : choosing == null ? 0 : stretching || brightening ? 2 : 1; }
+
+            /// <summary>Opens a view from the control with this key: the list's place is kept for the way back.</summary>
+            void Into(string from)
+            {
+                string stale;
+                double was;
+                trail.Pop(Depth() - 1, out stale, out was);   // a view a rebuild closed by itself (its game lost its resolution) leaves no step behind
+                trail.Push(from, scrollTo.Target);
+                ScrollHome();
+                wheel = 0;
+                entered = true;
+            }
+
+            /// <summary>After a view closed (one or more levels): the list back where it was, the focus on what opened it.</summary>
+            void Out()
+            {
+                string from;
+                double at;
+                wheel = 0;
+                if (!trail.Pop(Depth(), out from, out at)) { ScrollHome(); return; }
+                scrollTo.Snap(at);   // Rebuild keeps it within the list
+                scroll = (int)Math.Round(at);
+                focusKey = from;
+                returned = true;
+            }
+
+            /// <summary>The back button, Backspace and Esc: one view up.</summary>
+            void GoBack()
+            {
+                if (stretching) stretching = false;
+                else if (brightening) brightening = false;
+                else { picking = false; choosing = null; }
+                Out();
+                Rebuild();
             }
 
             /// <summary>
@@ -366,7 +440,7 @@ namespace HdrSwitch
             {
                 var list = new List<int>();
                 for (int i = 0; i < items.Count; i++)
-                    if ((items[i].Click != null || items[i].Role == AccessibleRole.StaticText) && (items[i].Name ?? items[i].Tip) != null) list.Add(i);
+                    if ((items[i].Click != null || items[i].Listed || items[i].Role == AccessibleRole.StaticText) && (items[i].Name ?? items[i].Tip) != null) list.Add(i);
                 return list;
             }
 
@@ -395,56 +469,88 @@ namespace HdrSwitch
             sealed class ItemAccess : AccessibleObject
             {
                 readonly Flyout f;
-                readonly int index;
                 readonly AccessibleObject parent;
-                readonly Item item;   // the item as it was asked for: a rebuild since makes this one stale, not wrong
+                readonly string key;   // every rebuild replaces the items: the one this stands for is found by its key each time
+                readonly Item first;   // the item as it was asked for: what it was called once it is gone
 
                 public ItemAccess(Flyout f, int index, AccessibleObject parent)
                 {
                     this.f = f;
-                    this.index = index;
                     this.parent = parent;
-                    item = f.items[index];
+                    first = f.items[index];
+                    key = first.Key;
                 }
 
-                bool Live { get { return index < f.items.Count && ReferenceEquals(f.items[index], item); } }
-                public override string Name { get { return item.Name ?? item.Tip; } }
-                public override string Description { get { return item.Name != null ? item.Tip : null; } }
-                public override AccessibleRole Role { get { return item.Role; } }
+                int Index { get { return key != null ? f.items.FindIndex(it => it.Key == key) : f.items.IndexOf(first); } }
+                Item Now { get { int i = Index; return i >= 0 ? f.items[i] : null; } }
+                Item Said { get { return Now ?? first; } }
+                public override string Name { get { return Said.Name ?? Said.Tip; } }
+                public override string Description { get { return Said.Name != null ? Said.Tip : null; } }
+                public override AccessibleRole Role { get { return Said.Role; } }
                 public override AccessibleObject Parent { get { return parent; } }
 
                 public override AccessibleStates State
                 {
                     get
                     {
-                        if (!Live) return AccessibleStates.Unavailable;
-                        var st = AccessibleStates.None;
-                        if (item.Click != null) st |= AccessibleStates.Focusable;
-                        else if (item.Role != AccessibleRole.StaticText) st |= AccessibleStates.Unavailable;   // the update button while busy
-                        if (f.focus == index) st |= AccessibleStates.Focused;
-                        if (item.Selected) st |= AccessibleStates.Checked;
-                        if (item.Busy) st |= AccessibleStates.Busy;
+                        int i = Index;
+                        if (i < 0) return AccessibleStates.Unavailable;
+                        var item = f.items[i];
+                        var st = Marks(item);
+                        if (f.Focusable(i)) st |= AccessibleStates.Focusable;
+                        if (f.focus == i) st |= AccessibleStates.Focused;
                         if (item.Scrolls && !f.ListNow().IntersectsWith(f.OnScreen(item))) st |= AccessibleStates.Offscreen;
                         return st;
                     }
                 }
 
-                public override Rectangle Bounds { get { return Live ? f.RectangleToScreen(f.OnScreen(item)) : Rectangle.Empty; } }
+                public override Rectangle Bounds { get { var item = Now; return item != null ? f.RectangleToScreen(f.OnScreen(item)) : Rectangle.Empty; } }
 
                 public override string DefaultAction
                 {
-                    get { return item.Click == null ? null : item.Role == AccessibleRole.CheckButton ? "Toggle" : "Press"; }
+                    get { var item = Now; return item == null || item.Click == null ? null : item.Role == AccessibleRole.CheckButton ? "Toggle" : "Press"; }
                 }
 
                 public override void DoDefaultAction()
                 {
-                    var click = item.Click;
-                    if (Live && click != null) f.BeginInvoke((Action)(() => f.Do(click)));   // not inside the screen reader's call
+                    var item = Now;
+                    var click = item != null ? item.Click : null;
+                    if (click != null) f.BeginInvoke((Action)(() => f.Do(click)));   // not inside the screen reader's call
                 }
 
                 public override void Select(AccessibleSelection flags)
                 {
-                    if (Live && (flags & AccessibleSelection.TakeFocus) != 0) f.SetFocus(index);
+                    int i = Index;
+                    if (i >= 0 && (flags & AccessibleSelection.TakeFocus) != 0) f.SetFocus(i);
+                }
+            }
+
+            /// <summary>The state a screen reader hears that comes from the item itself: checked, busy, or unavailable while it can't be clicked.</summary>
+            static AccessibleStates Marks(Item it)
+            {
+                var st = AccessibleStates.None;
+                if (it.Click == null && it.Role != AccessibleRole.StaticText) st |= AccessibleStates.Unavailable;   // the update button while busy
+                if (it.Selected) st |= AccessibleStates.Checked;
+                if (it.Busy) st |= AccessibleStates.Busy;
+                return st;
+            }
+
+            /// <summary>
+            /// After a rebuild: tells screen readers what changed in place – a switch flipped on the focused control, a
+            /// new label, the update's next step – which they don't notice by themselves in a window they see as painted.
+            /// </summary>
+            void Tell(Dictionary<string, Item> before)
+            {
+                if (!Visible || closing || !IsHandleCreated) return;
+                var list = AccessibleItems();
+                for (int c = 0; c < list.Count; c++)
+                {
+                    var it = items[list[c]];
+                    Item was;
+                    if (it.Key == null || !before.TryGetValue(it.Key, out was)) continue;
+                    if (list[c] != focus && it.Key != "update") continue;   // what a screen reader follows: the focus, and the update's progress
+                    if ((was.Name ?? was.Tip) != (it.Name ?? it.Tip)) AccessibilityNotifyClients(AccessibleEvents.NameChange, c);
+                    if (Marks(was) != Marks(it)) AccessibilityNotifyClients(AccessibleEvents.StateChange, c);
                 }
             }
 
@@ -472,6 +578,8 @@ namespace HdrSwitch
 
             void Rebuild()
             {
+                var before = new Dictionary<string, Item>();   // for Tell: what a screen reader was told last
+                foreach (var it in items) if (it.Key != null) before[it.Key] = it;
                 items.Clear();
                 foreach (var r in rolls.Values) r.Seen = false;
                 int W = S(376), M = S(16), G = S(12), CP = S(16);
@@ -517,7 +625,7 @@ namespace HdrSwitch
                     float fit = !busy ? ur.Width : (failed || waits ? S(18) : S(12) + spin + gap) + roll.TargetWidth + S(18);
                     items.Add(new Item
                     {
-                        Name = label, Rect = ur, Key = "update", On = busy, Busy = busy && !failed && !waits, Width = Math.Min(ur.Width, fit), Shake = failed, InCard = true,
+                        Name = label, Rect = ur, Key = "update", On = busy, Busy = busy && !failed && !waits, Width = Math.Min(ur.Width, fit), Shake = failed, InCard = true, Listed = true,
                         Click = busy ? null : (Action)(() => { app.InstallUpdate(); Rebuild(); }),
                         Paint = (g, rc, lk) =>
                         {
@@ -633,14 +741,15 @@ namespace HdrSwitch
                 }
                 else names = app.games.Concat(app.excluded).Concat(app.profiles.Keys).Distinct().OrderBy(app.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
                 int count = choosing != null ? (brightening ? levels.Count : modes.Count) : names.Count;
-                int visible = Math.Max(1, Math.Min(5, count));   // five rows: the flyout stays clear of the screen's top at 150 %
                 int footH = choosing != null ? S(52) : S(8);
+                // Up to five rows, fewer when the whole panel wouldn't fit above the taskbar (a high scale, a tall status card).
+                int visible = FlyoutRows(Where().WorkingArea.Height, S(12), y + headH + footH + G + S(32) + M, rowH, count);
                 var c3 = new Rectangle(M, y, W - 2 * M, headH + visible * rowH + footH);
                 items.Add(new Item { Rect = c3, Paint = (g, rc, lk) => Glass.Chip(g, rc, S(20), Theme.Chip) });
                 if (picking || choosing != null)
                 {
                     var back = new Rectangle(c3.X + S(8), c3.Y + S(6), S(32), S(32));
-                    items.Add(new Item { Rect = back, Key = "back", Name = "Back", Click = () => { if (stretching) stretching = false; else if (brightening) brightening = false; else { picking = false; choosing = null; } ScrollHome(); Rebuild(); },
+                    items.Add(new Item { Rect = back, Key = "back", Name = "Back", Click = GoBack,
                         Paint = (g, rc, lk) => Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, Theme.Text1) });
                     string head = picking ? "Add a program" : app.DisplayName(choosing);
                     string headRight = picking ? "" : brightening ? "SDR brightness" : stretching ? "inside " + chosen.Text : "at " + hz + " Hz";
@@ -663,7 +772,7 @@ namespace HdrSwitch
                     var add = new Rectangle(c3.Right - S(10) - S(30), c3.Y + S(7), S(30), S(30));
                     var look = new Rectangle(add.X - S(6) - S(30), add.Y, S(30), S(30));
                     bool scanning = app.scanning;
-                    items.Add(new Item { Rect = look, Key = "look", Tip = scanning ? "Looking for games…" : "Look for games", Busy = scanning,
+                    items.Add(new Item { Rect = look, Key = "look", Tip = scanning ? "Looking for games…" : "Look for games", Busy = scanning, Listed = true,
                         Click = scanning ? null : (Action)(() => { app.ScanInBackground(true); Rebuild(); }),
                         Paint = (g, rc, lk) =>
                         {
@@ -671,7 +780,7 @@ namespace HdrSwitch
                             Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, Theme.Fade(Theme.Text1, 1 - lk.Busy));
                             Theme.Spinner(g, new PointF(rc.X + rc.Width / 2f, rc.Y + rc.Height / 2f), S(13), Math.Max(1.5f, 1.75f * k), Theme.Text1, lk.Busy);
                         } });
-                    items.Add(new Item { Rect = add, Key = "add", Tip = "Add a program", Click = () => { picking = true; ScrollHome(); Rebuild(); },
+                    items.Add(new Item { Rect = add, Key = "add", Tip = "Add a program", Click = () => { picking = true; Into("add"); Rebuild(); },
                         Paint = (g, rc, lk) => Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, Theme.Text1) });
                 }
                 // A little narrower than the card, so the list's square bitmap stays clear of the card's round corners.
@@ -697,7 +806,7 @@ namespace HdrSwitch
                         string levelDetail = level < 0 ? "Not changed" : (80 + 4 * level) + " nits";
                         items.Add(new Item { Rect = rr, Scrolls = true, Key = "bright:" + level, Name = levelText + ", " + levelDetail, Role = AccessibleRole.RadioButton, Selected = isMine, Click = () =>
                         {
-                            brightening = false; ScrollHome();
+                            brightening = false; Out();
                             app.SetBrightness(game, level);
                             Rebuild();
                         }, Paint = (g, rc, lk) =>
@@ -719,7 +828,7 @@ namespace HdrSwitch
                             int mine;
                             string brightText = app.brightness.TryGetValue(game, out mine) ? mine + " (" + (80 + 4 * mine) + " nits)" : "Windows setting";
                             bool set = app.brightness.ContainsKey(game);
-                            items.Add(new Item { Rect = rr, Scrolls = true, Key = "mode:bright", Name = "SDR brightness: " + brightText, Click = () => { brightening = true; ScrollHome(); Rebuild(); }, Paint = (g, rc, lk) =>
+                            items.Add(new Item { Rect = rr, Scrolls = true, Key = "mode:bright", Name = "SDR brightness: " + brightText, Click = () => { brightening = true; Into("mode:bright"); Rebuild(); }, Paint = (g, rc, lk) =>
                             {
                                 RowBg(g, rc, lk);
                                 Draw(g, "SDR brightness", fonts.Body, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, S(130), rowH), TfLeft);
@@ -733,7 +842,7 @@ namespace HdrSwitch
                             // Opens the list of resolutions the game itself can run at, stretched over this one.
                             Resolution.Mode ownNow = app.StretchOf(game);
                             string ownText = ownNow == null ? "Not stretched" : ownNow.Text + ", stretched";
-                            items.Add(new Item { Rect = rr, Scrolls = true, Key = "mode:stretch", Name = "Game resolution: " + ownText, Click = () => { stretching = true; ScrollHome(); Rebuild(); }, Paint = (g, rc, lk) =>
+                            items.Add(new Item { Rect = rr, Scrolls = true, Key = "mode:stretch", Name = "Game resolution: " + ownText, Click = () => { stretching = true; Into("mode:stretch"); Rebuild(); }, Paint = (g, rc, lk) =>
                             {
                                 RowBg(g, rc, lk);
                                 Draw(g, "Game resolution", fonts.Body, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, S(130), rowH), TfLeft);
@@ -751,7 +860,7 @@ namespace HdrSwitch
                             string ownDetail = m == null ? "" : AspectText(m);
                             items.Add(new Item { Rect = rr, Scrolls = true, Key = key, Name = ownLabel + (ownDetail.Length > 0 ? ", " + ownDetail : ""), Role = AccessibleRole.RadioButton, Selected = isOwn, Click = () =>
                             {
-                                stretching = false; choosing = null; ScrollHome();
+                                stretching = false; choosing = null; Out();
                                 app.SetStretch(game, m);
                                 Rebuild();
                             }, Paint = (g, rc, lk) =>
@@ -769,7 +878,7 @@ namespace HdrSwitch
                         string detail = m == null ? (full == null ? "" : "Full screen") : SizeText(m, full, inches);
                         items.Add(new Item { Rect = rr, Scrolls = true, Key = key, Name = label + (detail.Length > 0 ? ", " + detail : ""), Role = AccessibleRole.RadioButton, Selected = isChosen, Click = () =>
                         {
-                            choosing = null; ScrollHome();
+                            choosing = null; Out();
                             app.SetProfile(game, m == null ? null : new Resolution.Mode { Width = m.Width, Height = m.Height, Hz = keepHz });
                             Rebuild();
                         }, Paint = (g, rc, lk) =>
@@ -783,7 +892,7 @@ namespace HdrSwitch
                     }
                     string name = names[i];
                     if (picking)
-                        items.Add(new Item { Rect = rr, Scrolls = true, Key = "pick:" + name, Name = "Add " + name + ".exe", Click = () => { app.Add(name); picking = false; ScrollHome(); Rebuild(); }, Paint = (g, rc, lk) =>
+                        items.Add(new Item { Rect = rr, Scrolls = true, Key = "pick:" + name, Name = "Add " + name + ".exe", Click = () => { app.Add(name); picking = false; Out(); Rebuild(); }, Paint = (g, rc, lk) =>
                         {
                             RowBg(g, rc, lk);
                             Draw(g, name + ".exe", fonts.Body, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, rc.Width - 2 * CP - S(24), rowH), TfLeft);
@@ -809,7 +918,7 @@ namespace HdrSwitch
                             Theme.Switch(g, new RectangleF(rc.Right - CP - S(44), rc.Y + (rowH - S(26)) / 2f, S(44), S(26)), lk.On, lk.Hover);
                         } });
                         // The monitor symbol opens the game's resolution and brightness view; white when it has either.
-                        items.Add(new Item { Rect = mon, Scrolls = true, Key = "mon:" + name, Tip = "Resolution and SDR brightness", Name = "Resolution and SDR brightness for " + app.DisplayName(name), Click = () => { choosing = name; stretching = false; brightening = false; ScrollHome(); Rebuild(); },
+                        items.Add(new Item { Rect = mon, Scrolls = true, Key = "mon:" + name, Tip = "Resolution and SDR brightness", Name = "Resolution and SDR brightness for " + app.DisplayName(name), Click = () => { choosing = name; stretching = false; brightening = false; Into("mon:" + name); Rebuild(); },
                             Paint = (g, rc, lk) => Button(g, rc, lk, Theme.None, "", fonts.Glyph, prof != null || app.brightness.ContainsKey(name) ? Theme.Text1 : Theme.Mix(Theme.Text3, Theme.Text1, lk.Hover)) });
                     }
                 }
@@ -837,8 +946,8 @@ namespace HdrSwitch
                     Draw(g, "Exit", fonts.Body, Theme.Text1, rc, TfCenter);
                 } });
                 var edit = new Rectangle(exit.X - S(8) - S(32), y, S(32), S(32));
-                string file = choosing != null ? ProfilesFile : ListFile;
-                items.Add(new Item { Rect = edit, Key = "edit", Tip = choosing != null ? "Edit resolutions.txt" : "Edit games.txt", Click = () =>
+                string file = FlyoutFile(choosing != null, brightening);   // the file behind what the list shows
+                items.Add(new Item { Rect = edit, Key = "edit", Tip = "Edit " + System.IO.Path.GetFileName(file), Click = () =>
                 {
                     Dismiss(true);   // at once: Notepad is about to come to the front
                     try { Process.Start("notepad.exe", "\"" + file + "\""); } catch { }
@@ -879,8 +988,15 @@ namespace HdrSwitch
 
                 ClientSize = new Size(W, contentH + Grow);
                 pressed = -1;
-                focus = focusKey == null ? -1 : items.FindIndex(it => it.Key == focusKey && it.Click != null);
-                if (focus < 0 && focusKey != null && keyboard) MoveFocus(0);   // its control went (a view changed): start at the top
+                focus = focusKey == null ? -1 : items.FindIndex(it => it.Key == focusKey);
+                if (!Focusable(focus)) focus = -1;
+                bool into = entered, outOf = returned;
+                entered = returned = false;
+                int firstRow = items.FindIndex(it => it.Scrolls && it.Click != null);
+                if (into && keyboard && firstRow >= 0) SetFocus(firstRow);       // a view opened: the keyboard starts on its first row
+                else if (outOf && keyboard && focus >= 0) SetFocus(focus);        // back: on the control that opened it, scrolled into view
+                else if (focus < 0 && focusKey != null && keyboard) MoveFocus(0);   // its control went: start at the top
+                Tell(before);
                 if (Visible)
                 {
                     final = Corner(out slide);
@@ -977,6 +1093,7 @@ namespace HdrSwitch
             void Render()
             {
                 queued = false;
+                if (!Visible) return;   // queued before it closed: painting now would rebuild the surface Finish let go
                 try { PaintSurface(); }
                 catch (Exception e) { Guard.Log("Painting the flyout", e); }
             }
@@ -986,11 +1103,18 @@ namespace HdrSwitch
             {
                 if (fonts == null || !IsHandleCreated || ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
                 var all = new RectangleF(0, 0, ClientSize.Width, ClientSize.Height);
-                if (surface == null || surface.Size != ClientSize)
+                // The surface is made for the tallest the window gets (the status card at its full height) and only made
+                // again when the window outgrows it: while the card's height animates, each frame shows less of it, not a new one.
+                if (surface == null || surface.Size.Width < ClientSize.Width || surface.Size.Height < ClientSize.Height)
                 {
                     if (surface != null) surface.Dispose();
-                    surface = new Glass.Surface(ClientSize);
+                    surface = new Glass.Surface(new Size(ClientSize.Width, Math.Max(ClientSize.Height, contentH)));
+                    shaped = Size.Empty;
+                }
+                if (shaped != ClientSize)   // the shape follows the window's height; a region is cheap next to a new surface
+                {
                     using (var p = Theme.Round(all, S(26))) Glass.SetShape(Handle, surface.G, p);
+                    shaped = ClientSize;
                 }
                 var g = surface.G;
                 g.Clear(Color.Transparent);
@@ -1032,7 +1156,7 @@ namespace HdrSwitch
                 Glass.Rim(g, all, S(26));
                 bool blur = Glass.Transparency && fade >= 0.5;
                 if (blur != blurOn) { Glass.SetBlur(Handle, blur); blurOn = blur; }
-                surface.Present(Handle, Location, fade);
+                surface.Present(Handle, Location, ClientSize, fade);
             }
 
             Look LookOf(int i)
@@ -1215,12 +1339,121 @@ namespace HdrSwitch
             {
                 base.OnMouseWheel(e);
                 if (scrollMax == 0 || closing || !ListNow().Contains(e.Location)) return;
-                scrollTo.To(Math.Max(0, Math.Min(scrollMax, scrollTo.Target - Math.Sign(e.Delta) * rowH * 2)));
+                // In proportion to the turn: a notch (120) moves a set distance, a touchpad's many small deltas add up to
+                // the same, and what is less than a pixel waits for the next one.
+                int step = WheelStep(SystemInformation.MouseWheelScrollLines, rowH, listClip.Height / Math.Max(1, rowH));
+                int px = WheelPixels(ref wheel, e.Delta, step);
+                if (px == 0) return;
+                scrollTo.To(Math.Max(0, Math.Min(scrollMax, scrollTo.Target - px)));
                 thumb.To(1);
                 thumbRest.Stop();
                 thumbRest.Start();
                 Motion.Run(tick);
                 if (Motion.Reduced) Tick(0);   // nothing animates: take the new position now
+            }
+        }
+
+        // ---- the flyout's decisions, kept apart from the window so the checks can run them ----
+
+        /// <summary>
+        /// The monitor the flyout uses: the one it opened on while that one is still there, else the one under the mouse.
+        /// </summary>
+        internal static string FlyoutScreen(string openedOn, ICollection<string> present, string underMouse)
+        {
+            return openedOn != null && present.Contains(openedOn) ? openedOn : underMouse;
+        }
+
+        /// <summary>
+        /// Where a panel this size sits on a monitor: in the corner by the taskbar, margin in, and the offset it slides in
+        /// from (towards the taskbar). The taskbar is wherever the working area stops short of the monitor's bounds.
+        /// </summary>
+        internal static Point FlyoutCorner(Rectangle wa, Rectangle b, Size size, int margin, int slide, out Point slideFrom)
+        {
+            int x = wa.Right - margin - size.Width, y = wa.Bottom - margin - size.Height;
+            slideFrom = new Point(0, slide);                                                     // taskbar at the bottom
+            if (wa.Top > b.Top) { y = wa.Top + margin; slideFrom = new Point(0, -slide); }        // at the top
+            else if (wa.Left > b.Left) { x = wa.Left + margin; slideFrom = new Point(-slide, 0); }
+            else if (wa.Right < b.Right) slideFrom = new Point(slide, 0);
+            return new Point(x, y);
+        }
+
+        /// <summary>
+        /// How many list rows the flyout shows: up to five, but only as many as fit in the working area's height with the
+        /// rest of the panel (fixedH: everything but the rows) and the margin above and below it. Never fewer than one:
+        /// the list scrolls. All in pixels, at the monitor's scale.
+        /// </summary>
+        internal static int FlyoutRows(int workAreaH, int margin, int fixedH, int rowH, int count)
+        {
+            int fit = rowH > 0 ? (workAreaH - 2 * margin - fixedH) / rowH : 1;
+            return Math.Max(1, Math.Min(Math.Min(5, count), fit));
+        }
+
+        internal enum FlyoutKey { Nothing, Ring, Click }
+
+        /// <summary>
+        /// What Enter or Space does. A held key (auto-repeat) does nothing; with the ring hidden (the mouse took over)
+        /// the first press only shows where the keyboard is; then it clicks.
+        /// </summary>
+        internal static FlyoutKey FlyoutKeyAction(bool ringShown, bool repeat, bool hasFocus)
+        {
+            if (repeat || !hasFocus) return FlyoutKey.Nothing;
+            return ringShown ? FlyoutKey.Click : FlyoutKey.Ring;
+        }
+
+        /// <summary>
+        /// How far one wheel notch (120) scrolls the list, in pixels: half a row for each line of Windows' "lines to
+        /// scroll" setting (3, the default: one and a half rows), never more than the list less a row, so a notch
+        /// always leaves a row of what was in view. "One screen at a time" (-1) scrolls that much; 0 doesn't scroll.
+        /// </summary>
+        internal static int WheelStep(int lines, int rowH, int visibleRows)
+        {
+            int page = Math.Max(1, visibleRows - 1) * rowH;
+            if (lines == 0) return 0;
+            if (lines < 0) return page;
+            return Math.Min(page, Math.Max(1, lines * rowH / 2));
+        }
+
+        /// <summary>
+        /// The pixels a wheel delta scrolls (positive: towards the top), step per 120. What doesn't make a whole pixel
+        /// stays in carry for the next delta, so many small touchpad deltas move exactly as far as one notch.
+        /// </summary>
+        internal static int WheelPixels(ref int carry, int delta, int step)
+        {
+            long total = carry + (long)delta * step;
+            int px = (int)(total / 120);
+            carry = (int)(total - px * 120L);
+            return px;
+        }
+
+        /// <summary>The file the flyout's pencil opens: the one behind what its list shows.</summary>
+        internal static string FlyoutFile(bool choosing, bool brightening)
+        {
+            return !choosing ? ListFile : brightening ? BrightnessFile : ProfilesFile;
+        }
+
+        /// <summary>
+        /// The way back through the flyout's views: for each open one, the control that opened it and where the list
+        /// below was scrolled.
+        /// </summary>
+        internal sealed class FlyoutTrail
+        {
+            readonly List<KeyValuePair<string, double>> steps = new List<KeyValuePair<string, double>>();
+
+            public int Count { get { return steps.Count; } }
+            public void Clear() { steps.Clear(); }
+            public void Push(string from, double scroll) { steps.Add(new KeyValuePair<string, double>(from, scroll)); }
+
+            /// <summary>Back to this many open views (one level or several at once): where the outermost one closed was entered from.</summary>
+            public bool Pop(int depth, out string from, out double scroll)
+            {
+                from = null;
+                scroll = 0;
+                depth = Math.Max(0, depth);
+                if (steps.Count <= depth) return false;
+                from = steps[depth].Key;
+                scroll = steps[depth].Value;
+                steps.RemoveRange(depth, steps.Count - depth);
+                return true;
             }
         }
     }

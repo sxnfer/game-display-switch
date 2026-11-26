@@ -101,12 +101,15 @@ namespace HdrSwitch
             }
 
             /// <summary>Shows what was drawn, at this screen point, faded by alpha (0 → 1).</summary>
-            public void Present(IntPtr hwnd, Point at, double alpha)
+            public void Present(IntPtr hwnd, Point at, double alpha) { Present(hwnd, at, Size, alpha); }
+
+            /// <summary>Shows only its top-left part, this size: a surface made for the tallest the window gets serves every height below it.</summary>
+            public void Present(IntPtr hwnd, Point at, Size size, double alpha)
             {
                 G.Flush(FlushIntention.Sync);
                 var blend = new Native.BlendFunction { SourceConstantAlpha = (byte)Math.Round(255 * Math.Max(0, Math.Min(1, alpha))), AlphaFormat = 1 };   // AC_SRC_ALPHA
                 Point src = Point.Empty;
-                Size sz = Size;
+                Size sz = new Size(Math.Min(size.Width, Size.Width), Math.Min(size.Height, Size.Height));
                 Native.UpdateLayeredWindow(hwnd, IntPtr.Zero, ref at, ref sz, dc, ref src, 0, ref blend, 2);   // ULW_ALPHA
             }
 
