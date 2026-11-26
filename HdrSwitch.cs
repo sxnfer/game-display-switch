@@ -96,11 +96,13 @@ namespace HdrSwitch
         static readonly string RecordersFile = Path.Combine(Dir, "recorders.txt");
         static readonly string BrightnessFile = Path.Combine(Dir, "brightness.txt");
         static readonly string BrightStateFile = Path.Combine(Dir, "brightness.state");   // the level this app set – for crash recovery
+        static readonly string HdrStateFile = Path.Combine(Dir, "hdr.state");   // the displays this app switched to HDR – for crash recovery
 
         sealed class Running { public string Name; public RegisteredWaitHandle Wait; public WaitHandle Handle; }
         sealed class ActiveMode
         {
             public string Gdi;
+            public string Id;                    // the display, as it is known after a reboot (see Hdr.Display.Id)
             public Resolution.Mode Mode, Back;   // Back: the saved mode it returns to
             public Resolution.Mode Area;         // the competitive area Mode is stretched over – or null: Mode is the area itself, shown 1:1
             public string Game;
@@ -208,6 +210,7 @@ namespace HdrSwitch
             SystemEvents.DisplaySettingsChanged += onDisplayChanged;
 
             RecoverResolution();   // a previous run was killed while a game had its resolution
+            RecoverHdr();          // … or its HDR
             RecoverBrightness();   // … or its SDR brightness
             Rescan();              // games that were already running
             if (!ProfiledRunning())
@@ -215,6 +218,7 @@ namespace HdrSwitch
                 RevertResolution();
                 RestoreStrayScaling();
             }
+            StartGrace();          // HDR taken back from that run, with no game left that wants it: SDR after the usual wait
             scanTimer.Start();
             UpdateTray();
 
@@ -453,8 +457,7 @@ namespace HdrSwitch
             {
                 bool ours = InOurMode();
                 RestoreBrightness();
-                foreach (var d in owned) Hdr.Set(d, false);
-                owned.Clear();
+                AllToSdr();
                 if (ours) KeepMode();   // a game with only a resolution may still be running
             }
             if (running.Count == 0) notice = null;
@@ -509,9 +512,88 @@ namespace HdrSwitch
             if (d == null || d.On) return false;   // no HDR display, or HDR already on (not ours to switch back)
             bool ours = InOurMode();
             if (!Hdr.Set(d, true)) return false;
-            if (!owned.Any(o => o.Key == d.Key)) owned.Add(d);
+            Own(d);
             if (ours) KeepMode();   // e.g. an HDR game started while another game has its competitive resolution
             return true;
+        }
+
+        // Which displays this app switched to HDR is kept in hdr.state as well, one display per line (its Id, which stays
+        // the same across reboots). Written after HDR went on and after it went off, so a crash in between errs towards
+        // not owning: HDR it can't be sure it switched is never switched off. If the app is killed mid-game, the next start
+        // takes those displays back (RecoverHdr) and switches them to SDR once no game that wants HDR runs.
+
+        /// <summary>HDR this app has just switched on: remembered, also in hdr.state.</summary>
+        void Own(Hdr.Display d)
+        {
+            if (owned.Any(o => o.Key == d.Key)) return;
+            owned.Add(d);
+            SaveOwned();
+        }
+
+        /// <summary>HDR this app has just switched off again.</summary>
+        void Disown(Hdr.Display d)
+        {
+            if (owned.RemoveAll(o => o.Key == d.Key) > 0) SaveOwned();
+        }
+
+        /// <summary>Every display this app switched to HDR goes back to SDR.</summary>
+        void AllToSdr()
+        {
+            foreach (var d in owned) Hdr.Set(d, false);
+            owned.Clear();
+            SaveOwned();
+        }
+
+        void SaveOwned()
+        {
+            if (owned.Count == 0) Guard.Delete(HdrStateFile);
+            else Guard.Save(HdrStateFile, FormatHdrState(owned.Select(d => d.Id)));
+        }
+
+        /// <summary>
+        /// A previous run ended while it had HDR on: each display in hdr.state that still has HDR on is this app's again. One
+        /// with HDR off now (switched by hand, or gone) is dropped. HDR that isn't listed was never this app's and stays as it is.
+        /// </summary>
+        void RecoverHdr()
+        {
+            string text;
+            try
+            {
+                if (!File.Exists(HdrStateFile)) return;
+                text = File.ReadAllText(HdrStateFile);
+            }
+            catch (IOException) { return; }
+            catch (UnauthorizedAccessException) { return; }
+            var ids = ParseHdrState(text);
+            foreach (var d in Hdr.All())
+                if (d.On && ids.Any(d.Is) && !owned.Any(o => o.Key == d.Key)) owned.Add(d);
+            SaveOwned();   // only what was taken back stays listed
+        }
+
+        /// <summary>hdr.state: one display Id per line, each once.</summary>
+        internal static string FormatHdrState(IEnumerable<string> ids)
+        {
+            var sb = new StringBuilder();
+            foreach (string id in ParseHdrState(string.Join("\n", ids.Where(i => i != null)))) sb.Append(id).Append("\r\n");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// The display Ids in hdr.state, each once, in order. Blank lines, notes (#) and lines no display could have as its Id
+        /// (control characters, far too long) are skipped; an Id that matches no display now is simply never matched.
+        /// </summary>
+        internal static List<string> ParseHdrState(string text)
+        {
+            var ids = new List<string>();
+            if (text == null) return ids;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string raw in text.Split('\n'))
+            {
+                string id = raw.Trim();
+                if (id.Length == 0 || id.Length > 512 || id[0] == '#' || id.Any(char.IsControl)) continue;
+                if (seen.Add(id)) ids.Add(id);
+            }
+            return ids;
         }
 
         // ---- the game's own screen ----
@@ -553,12 +635,12 @@ namespace HdrSwitch
             if (on.Count == 0 && off.Count == 0) return;
             bool ours = InOurMode();
             foreach (var d in on)
-                if (Hdr.Set(d, true) && !owned.Any(o => o.Key == d.Key)) owned.Add(d);
+                if (Hdr.Set(d, true)) Own(d);
             foreach (var d in off)
             {
-                if (d.Key == brightKey) RestoreBrightness();
+                if (d.Is(brightKey)) RestoreBrightness();
                 Hdr.Set(d, false);
-                owned.RemoveAll(o => o.Key == d.Key);
+                Disown(d);
             }
             if (ours) KeepMode();
             UpdateTray();
@@ -628,8 +710,7 @@ namespace HdrSwitch
                 {
                     bool ours = InOurMode();
                     RestoreBrightness();
-                foreach (var d in owned) Hdr.Set(d, false);
-                    owned.Clear();
+                    AllToSdr();
                     if (ours) KeepMode();
                     Announce(new Island.Act { Id = "rec", Text = RecorderName(name) + " · SDR", Dot = Theme.Grey, Split = true, Bubble = Theme.Rec, Seconds = 4,
                         Balloon = "HDR is off while " + RecorderName(name) + " runs." });
@@ -668,8 +749,7 @@ namespace HdrSwitch
                 RevertResolution();
                 RestoreStrayScaling();
                 RestoreBrightness();
-                foreach (var d in owned) Hdr.Set(d, false);
-                owned.Clear();
+                AllToSdr();
                 Announce(new Island.Act { Id = "pause", Text = "Paused", Dot = Theme.Grey, Seconds = 2,
                     Balloon = "Paused: HDR and resolutions stay as they are until you resume (" + HotKey.Text + ")." });
             }
@@ -834,7 +914,7 @@ namespace HdrSwitch
             // Before the mode: the game's own mode change must find No scaling already set. A stretched mode needs no
             // driver setting – it only lasts while the game sets no mode of its own.
             int scalingBack = stretch ? -1 : TakeScaling(gdi);
-            var active = new ActiveMode { Gdi = gdi, Mode = mode, Area = stretch ? area : null, Back = Resolution.Saved(gdi) ?? now, Game = name, ScalingBack = scalingBack };
+            var active = new ActiveMode { Gdi = gdi, Id = DisplayIdOf(gdi), Mode = mode, Area = stretch ? area : null, Back = Resolution.Saved(gdi) ?? now, Game = name, ScalingBack = scalingBack };
             if (!SetMode(active))
             {
                 RestoreScaling(gdi, scalingBack);
@@ -884,6 +964,21 @@ namespace HdrSwitch
         }
 
         int strayScaling = -1;   // a scaling setting still to put back: left by a killed previous run, or deferred (see RestoreScaling)
+        string strayDisplay;     // the display it belongs to (its Id, or a GDI name from an older resolution.state)
+
+        /// <summary>A display's Id (see Hdr.Display.Id) from its GDI name; the GDI name itself if no display has it now.</summary>
+        static string DisplayIdOf(string gdi)
+        {
+            var d = Hdr.All().FirstOrDefault(x => x.Gdi == gdi);
+            return d != null ? d.Id : gdi;
+        }
+
+        /// <summary>The GDI name the display with this Id (or GDI name) has now, or null if it isn't connected.</summary>
+        static string GdiOf(string id)
+        {
+            var d = Hdr.All().FirstOrDefault(x => x.Is(id));
+            return d != null && d.Gdi.Length > 0 ? d.Gdi : null;
+        }
 
         /// <summary>
         /// Switches the NVIDIA driver's scaling default to No scaling, so a game that sets its own mode in exclusive fullscreen
@@ -897,8 +992,10 @@ namespace HdrSwitch
             if (s < 0) return -1;
             if (Nvidia.Centres(s))
             {
+                if (strayScaling >= 0 && strayDisplay != null && GdiOf(strayDisplay) != gdi) return -1;   // another display's: put back on its own
                 int back = strayScaling;
                 strayScaling = -1;
+                strayDisplay = null;
                 return back;
             }
             // The driver saves the whole display configuration with the setting, the current resolution included – so it is
@@ -916,16 +1013,22 @@ namespace HdrSwitch
             if (back < 0 || Nvidia.Scaling(gdi) != Nvidia.NoScaling) return;   // nothing to do, or the user changed it
             if (Resolution.AtSaved(gdi) && Nvidia.SetScaling(gdi, back)) return;
             strayScaling = back;
-            if (res == null) WriteState(gdi + "|0|0|0|" + back);   // so a crash before the retry still puts it back
+            strayDisplay = DisplayIdOf(gdi);
+            if (res == null) WriteState(FormatModeState(ModeState.ScalingOnly(gdi, back, strayDisplay)));   // so a crash before the retry still puts it back
         }
 
+        /// <summary>A scaling setting still to put back goes back now, on the display it came from, if it is connected.</summary>
         void RestoreStrayScaling()
         {
             if (strayScaling < 0) return;
+            string gdi = strayDisplay == null ? TargetGdi() : GdiOf(strayDisplay);
+            if (gdi == null) return;   // that display isn't connected now: kept, in resolution.state too, for when it is
             int back = strayScaling;
             strayScaling = -1;
-            RestoreScaling(TargetGdi(), back);
-            if (strayScaling < 0 && res == null) DeleteState();
+            RestoreScaling(gdi, back);
+            if (strayScaling >= 0) return;   // deferred again
+            strayDisplay = null;
+            if (res == null) DeleteState();
         }
 
         /// <summary>
@@ -976,8 +1079,54 @@ namespace HdrSwitch
 
         void SaveState()
         {
-            WriteState(res.Gdi + "|" + res.Mode.Width + "|" + res.Mode.Height + "|" + res.Mode.Hz + "|" + res.ScalingBack
-                + (res.Area == null ? "" : "|" + res.Area.Width + "|" + res.Area.Height));
+            WriteState(FormatModeState(new ModeState { Gdi = res.Gdi, Id = res.Id, Width = res.Mode.Width, Height = res.Mode.Height, Hz = res.Mode.Hz,
+                ScalingBack = res.ScalingBack, AreaWidth = res.Area == null ? 0 : res.Area.Width, AreaHeight = res.Area == null ? 0 : res.Area.Height }));
+        }
+
+        /// <summary>
+        /// resolution.state: the mode this app set and what to put back. Width 0 is a record of the NVIDIA scaling setting only,
+        /// left to put back after the mode itself was gone.
+        /// </summary>
+        internal sealed class ModeState
+        {
+            public string Gdi;            // \\.\DISPLAY1, as it was when written
+            public string Id;             // the display across reboots (Hdr.Display.Id), or null: a file from an older version
+            public int Width, Height, Hz;
+            public int ScalingBack = -1;  // the NVIDIA scaling setting to put back, or -1
+            public int AreaWidth, AreaHeight;   // the area a stretched mode fills, or 0
+
+            public static ModeState ScalingOnly(string gdi, int back, string id)
+            {
+                return new ModeState { Gdi = gdi, Id = id, ScalingBack = back };
+            }
+        }
+
+        /// <summary>
+        /// "\\.\DISPLAY1|2368|1332|240|7|0|0|\\?\DISPLAY#…": GDI name, mode, scaling to put back, stretched area, display Id. Older
+        /// versions read the first seven fields the same way and ignore the Id.
+        /// </summary>
+        internal static string FormatModeState(ModeState m)
+        {
+            return m.Gdi + "|" + m.Width + "|" + m.Height + "|" + m.Hz + "|" + m.ScalingBack + "|" + m.AreaWidth + "|" + m.AreaHeight
+                + (string.IsNullOrEmpty(m.Id) ? "" : "|" + m.Id);
+        }
+
+        /// <summary>
+        /// resolution.state as written by this version or an older one ("gdi|w|h|hz", "…|scaling", "…|scaling|areaW|areaH"), or
+        /// null if it isn't one.
+        /// </summary>
+        internal static ModeState ParseModeState(string text)
+        {
+            if (text == null) return null;
+            string[] f = text.Trim().Split('|');
+            int w, h, hz, back = -1, areaW = 0, areaH = 0;
+            if (f.Length < 4 || f[0].Trim().Length == 0 || !int.TryParse(f[1], out w) || !int.TryParse(f[2], out h) || !int.TryParse(f[3], out hz)
+                || (f.Length > 4 && !int.TryParse(f[4], out back))
+                || (f.Length > 6 && (!int.TryParse(f[5], out areaW) || !int.TryParse(f[6], out areaH)))) return null;
+            if (w < 0 || h < 0 || hz < 0 || areaW < 0 || areaH < 0) return null;
+            string id = f.Length > 7 ? f[7].Trim() : "";
+            return new ModeState { Gdi = f[0].Trim(), Id = id.Length > 0 ? id : null, Width = w, Height = h, Hz = hz,
+                ScalingBack = back < 0 ? -1 : back, AreaWidth = areaW, AreaHeight = areaH };
         }
 
         /// <summary>The active mode is what this profile – and its stretched resolution, if it has one – asks for.</summary>
@@ -1028,20 +1177,21 @@ namespace HdrSwitch
             }
             catch (IOException) { return; }
             catch (UnauthorizedAccessException) { return; }
-            string[] f = text.Trim().Split('|');
-            int w, h, hz, back = -1, areaW = 0, areaH = 0;
-            if (f.Length < 4 || !int.TryParse(f[1], out w) || !int.TryParse(f[2], out h) || !int.TryParse(f[3], out hz)
-                || (f.Length > 4 && !int.TryParse(f[4], out back))
-                || (f.Length > 6 && (!int.TryParse(f[5], out areaW) || !int.TryParse(f[6], out areaH)))) { DeleteState(); return; }
-            var mode = new Resolution.Mode { Width = w, Height = h, Hz = hz };
-            if (!mode.Same(Resolution.Current(f[0])))   // the mode is gone (killed, reboot, put back by hand)
+            var m = ParseModeState(text);
+            if (m == null) { DeleteState(); return; }
+            var mode = new Resolution.Mode { Width = m.Width, Height = m.Height, Hz = m.Hz };
+            if (m.Width == 0 || !mode.Same(Resolution.Current(m.Gdi)))   // the mode is gone (killed, reboot, put back by hand)
             {
-                strayScaling = back;
-                DeleteState();
+                // The scaling setting outlives it, and stays in the file – as a scaling-only record – until it is back, so
+                // another crash before then still has it.
+                strayScaling = m.ScalingBack;
+                strayDisplay = m.Id ?? m.Gdi;
+                if (m.ScalingBack >= 0) WriteState(FormatModeState(ModeState.ScalingOnly(m.Gdi, m.ScalingBack, strayDisplay)));
+                else DeleteState();
                 return;
             }
-            res = new ActiveMode { Gdi = f[0], Mode = mode, Back = Resolution.Saved(f[0]), Game = "", ScalingBack = back,
-                Area = areaW > 0 && areaH > 0 ? new Resolution.Mode { Width = areaW, Height = areaH, Hz = hz } : null };
+            res = new ActiveMode { Gdi = m.Gdi, Id = m.Id ?? DisplayIdOf(m.Gdi), Mode = mode, Back = Resolution.Saved(m.Gdi), Game = "", ScalingBack = m.ScalingBack,
+                Area = m.AreaWidth > 0 && m.AreaHeight > 0 ? new Resolution.Mode { Width = m.AreaWidth, Height = m.AreaHeight, Hz = m.Hz } : null };
         }
 
         void LoadProfiles()
@@ -1230,13 +1380,15 @@ namespace HdrSwitch
         // Windows' "SDR content brightness" slider sets how bright everything that isn't HDR looks while HDR is on: the
         // desktop, SDR games, a game's own SDR menus. A game can have its own level (brightness.txt, or the flyout). While
         // it runs with HDR on, the display gets that level; afterwards the level from before comes back – only if it is
-        // still the one this app set, as with resolutions. Reading the level is documented; setting it is not, and uses
+        // still the one this app set, as with resolutions. Moving the slider yourself while the game runs wins: the level is
+        // then left as you set it, during the game and after. Reading the level is documented; setting it is not, and uses
         // the same call as Windows' own slider (see Hdr.SetSdrWhite).
 
         Dictionary<string, int> brightness = new Dictionary<string, int>();   // name → slider position 0…100
-        string brightKey;      // the display whose level this app changed
+        string brightKey;      // the display whose level this app changed: its Id (see Hdr.Display.Id), which a reboot keeps
         int brightBack = -1;   // its level before (raw, see Hdr.SdrWhite), or -1: nothing changed
         int brightSet = -1;    // the level this app set
+        string brightLeft;     // the display whose level the user moved during the game: left alone until no game wants a level
 
         /// <summary>The level a running game asks for, as a slider position, or -1.</summary>
         int WantedBrightness()
@@ -1254,12 +1406,21 @@ namespace HdrSwitch
         void SyncBrightness()
         {
             int want = WantedBrightness();
+            if (want < 0) brightLeft = null;   // the user's own level counted for the game it was set during
             var d = want < 0 ? null : HdrDisplayFor(running.Values.Select(r => r.Name).FirstOrDefault(brightness.ContainsKey));
             if (d == null || !d.On) { RestoreBrightness(); return; }
-            if (brightBack >= 0 && brightKey != d.Key) RestoreBrightness();   // another display now
+            if (d.Is(brightLeft)) return;   // the user's level, not ours: left as it is
+            if (brightBack >= 0 && !d.Is(brightKey)) RestoreBrightness();   // another display now
             int now = Hdr.SdrWhite(d), level = Hdr.LevelOf(want);
             if (now < 0) return;   // not readable: leave it alone
-            if (brightBack < 0) { brightBack = now; brightKey = d.Key; }
+            if (UserMovedBrightness(now, level, brightBack, brightSet))
+            {
+                // Not ours any more: no longer set, and not put back when the game closes.
+                brightLeft = d.Id;
+                ForgetBrightness();
+                return;
+            }
+            if (brightBack < 0) { brightBack = now; brightKey = d.Id; }
             if (now != level && !Hdr.SetSdrWhite(d, level)) { brightBack = -1; return; }
             if (brightSet != level) { brightSet = level; WriteBrightState(); }
         }
@@ -1268,16 +1429,56 @@ namespace HdrSwitch
         void RestoreBrightness()
         {
             if (brightBack < 0) return;
-            var d = Hdr.All().FirstOrDefault(x => x.Key == brightKey);
+            var d = Hdr.All().FirstOrDefault(x => x.Is(brightKey));   // a level from before a reboot finds its display by Id
             if (d != null && Hdr.SdrWhite(d) == brightSet) Hdr.SetSdrWhite(d, brightBack);
+            ForgetBrightness();
+        }
+
+        void ForgetBrightness()
+        {
             brightBack = brightSet = -1;
             brightKey = null;
             Guard.Delete(BrightStateFile);
         }
 
+        /// <summary>
+        /// While a game has its level: the slider was moved by someone else – it is neither the level this app set, nor the
+        /// game's level (changed in the flyout just now), nor the level from before. Only once this app has set one.
+        /// </summary>
+        internal static bool UserMovedBrightness(int now, int want, int back, int set)
+        {
+            return back >= 0 && set >= 0 && now >= 0 && now != set && now != want && now != back;
+        }
+
         void WriteBrightState()
         {
-            Guard.Save(BrightStateFile, brightKey + "|" + brightBack + "|" + brightSet);
+            Guard.Save(BrightStateFile, FormatBrightState(brightKey, brightBack, brightSet));
+        }
+
+        /// <summary>brightness.state: "display Id|level before|level set".</summary>
+        internal static string FormatBrightState(string display, int back, int set)
+        {
+            return display + "|" + back + "|" + set;
+        }
+
+        /// <summary>
+        /// brightness.state, or false if it isn't one. The display is an Id (\\?\DISPLAY#…) or, written by an older version,
+        /// "adapter:target" for that boot only – which still finds its display if Windows wasn't restarted since, and is
+        /// otherwise dropped.
+        /// </summary>
+        internal static bool ParseBrightState(string text, out string display, out int back, out int set)
+        {
+            display = null;
+            back = set = -1;
+            if (text == null) return false;
+            string[] f = text.Trim().Split('|');
+            if (f.Length != 3 || f[0].Trim().Length == 0 || !int.TryParse(f[1], out back) || !int.TryParse(f[2], out set) || back < 0 || set < 0)
+            {
+                back = set = -1;
+                return false;
+            }
+            display = f[0].Trim();
+            return true;
         }
 
         /// <summary>A previous run ended while a game had its level: take it over, so the next sync puts it back.</summary>
@@ -1286,11 +1487,11 @@ namespace HdrSwitch
             try
             {
                 if (!File.Exists(BrightStateFile)) return;
-                string[] f = File.ReadAllText(BrightStateFile).Trim().Split('|');
+                string display;
                 int back, set;
-                if (f.Length == 3 && int.TryParse(f[1], out back) && int.TryParse(f[2], out set) && back >= 0)
+                if (ParseBrightState(File.ReadAllText(BrightStateFile), out display, out back, out set))
                 {
-                    brightKey = f[0];
+                    brightKey = display;
                     brightBack = back;
                     brightSet = set;
                     RestoreBrightness();   // a game that still runs gets its level again with the first sync
@@ -1715,7 +1916,7 @@ namespace HdrSwitch
         void PutBack()
         {
             if (Interlocked.Exchange(ref puttingBack, 1) != 0) return;
-            Action[] steps = { RevertResolution, RestoreStrayScaling, RestoreBrightness, () => { foreach (var d in owned) Hdr.Set(d, false); owned.Clear(); } };
+            Action[] steps = { RevertResolution, RestoreStrayScaling, RestoreBrightness, AllToSdr };
             foreach (var step in steps)
             {
                 try { step(); }
@@ -2461,8 +2662,49 @@ namespace HdrSwitch
             public string Gdi;       // \\.\DISPLAY1 – matches Screen.DeviceName
             public bool Supported;  // HDR can be turned on
             public bool On;         // HDR is on
-            public string Key { get { return Adapter.High + ":" + Adapter.Low + ":" + Target; } }
+            public string Key { get { return Adapter.High + ":" + Adapter.Low + ":" + Target; } }   // for this boot only: the adapter's LUID changes with every start of Windows
+
+            internal string id;
+            /// <summary>
+            /// Who the display is across reboots, for the app's .state files: the monitor's device path
+            /// (\\?\DISPLAY#DEL41B8#…#{…}), which names the monitor and the port it is on. The GDI name if the path can't
+            /// be read; that one can change between boots, but is the best there is then.
+            /// </summary>
+            public string Id
+            {
+                get
+                {
+                    if (id == null)
+                    {
+                        string path = DevicePath(this);
+                        id = path.Length > 0 ? path : Gdi != null && Gdi.Length > 0 ? Gdi : Key;
+                    }
+                    return id;
+                }
+            }
+
+            /// <summary>This is the display named: by its Id, its GDI name, or its Key (a .state file from an older version, read in the same boot).</summary>
+            public bool Is(string idOrName)
+            {
+                return !string.IsNullOrEmpty(idOrName) && (string.Equals(Id, idOrName, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(Gdi, idOrName, StringComparison.OrdinalIgnoreCase) || Key == idOrName);
+            }
         }
+
+        /// <summary>The monitor's device path (DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME), or "" if it can't be read.</summary>
+        static string DevicePath(Display d)
+        {
+            try
+            {
+                var t = new TargetName { H = Header(2, typeof(TargetName), d.Adapter, d.Target) };   // GET_TARGET_NAME
+                return DisplayConfigGetDeviceInfo(ref t) == 0 && t.Path != null ? t.Path.Trim() : "";
+            }
+            catch (DllNotFoundException) { return ""; }
+            catch (EntryPointNotFoundException) { return ""; }
+        }
+
+        /// <summary>The size of DISPLAYCONFIG_TARGET_DEVICE_NAME as marshalled: 420 bytes, as in the Windows SDK.</summary>
+        internal static int TargetNameSize { get { return Marshal.SizeOf(typeof(TargetName)); } }
 
         public static List<Display> All()
         {
@@ -2575,6 +2817,16 @@ namespace HdrSwitch
         [StructLayout(LayoutKind.Sequential)] struct DeviceInfoHeader { public int Type; public int Size; public LUID Adapter; public uint Id; }
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         struct SourceName { public DeviceInfoHeader H; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string Gdi; }
+        // DISPLAYCONFIG_TARGET_DEVICE_NAME (wingdi.h): header 20, flags 4, outputTechnology 4, edidManufactureId 2,
+        // edidProductCodeId 2, connectorInstance 4, monitorFriendlyDeviceName WCHAR[64] = 128, monitorDevicePath WCHAR[128] = 256:
+        // 420 bytes, every field at its natural alignment, so no padding.
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct TargetName
+        {
+            public DeviceInfoHeader H; public uint Flags; public int Technology; public ushort EdidMaker; public ushort EdidProduct; public uint Connector;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string Friendly;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Path;
+        }
         [StructLayout(LayoutKind.Sequential)] struct ColorInfo { public DeviceInfoHeader H; public uint Value; public uint Encoding; public uint Bits; }
         [StructLayout(LayoutKind.Sequential)] struct ColorInfo2 { public DeviceInfoHeader H; public uint Value; public uint Encoding; public uint Bits; public uint ActiveColorMode; }
         [StructLayout(LayoutKind.Sequential)] struct SetState { public DeviceInfoHeader H; public uint Value; }
@@ -2584,6 +2836,7 @@ namespace HdrSwitch
         [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPaths, out uint numModes);
         [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint numPaths, [Out] PathInfo[] paths, ref uint numModes, IntPtr modes, IntPtr topology);
         [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref SourceName info);
+        [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref TargetName info);
         [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref ColorInfo info);
         [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref ColorInfo2 info);
         [DllImport("user32.dll")] static extern int DisplayConfigSetDeviceInfo(ref SetState info);
