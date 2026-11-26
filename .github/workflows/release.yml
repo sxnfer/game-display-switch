@@ -2,37 +2,91 @@
 # with the exe, its SHA256 checksum and a signature of that checksum. The app's updater only installs an exe whose
 # checksum matches, from a checksum file whose signature matches the update key built into the app.
 #
+# Three jobs, so the keys never share a job with the repository's own code:
+#   build    checks the tag (vN.N.N, on main), builds, runs the checks. Read-only token, no secrets.
+#   sign     no checkout, runs nothing from the repository: takes the built exe, code-signs it if a certificate exists,
+#            writes SHA256SUMS.txt and signs it with the update key. No token permissions.
+#   publish  no checkout, no secrets: creates the release from sign's files. The only job that can write.
+#
 # Secrets (Settings › Secrets and variables › Actions):
 #   UPDATE_SIGNING_KEY     required: the private update key, RSA in .NET XML form. Without it the release stops here,
 #                          because no copy of the app would install it. See docs/how-it-works.md.
 #   SIGNING_CERT_PFX       optional: a code-signing certificate (.pfx, base64). With it the exe is Authenticode-signed,
 #   SIGNING_CERT_PASSWORD  so Windows shows the publisher instead of "Unknown publisher".
+#
+# Actions are pinned to full commit SHAs (a tag can be moved; a SHA can't). To update one:
+#   git ls-remote https://github.com/actions/<name> 'refs/tags/vX.Y.Z*'   (use the ^{} line if there is one)
 name: Release
 
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
+permissions: {}
+
+# One release at a time: a tag pushed while another is releasing waits instead of racing it. (GitHub keeps one
+# waiting run; a third push while one waits replaces it, so push it again once the others are done.)
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: windows-latest
-    env:
-      HAS_CERT: ${{ secrets.SIGNING_CERT_PFX != '' }}
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0   # all branches, so origin/main is there for the check below
+          persist-credentials: false
+
+      - name: Check the tag
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # [0-9], -cmatch and \z: .NET's \d also matches other scripts' digits, -match ignores case, $ allows a final newline.
+          if ($env:TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+\z') { throw "Tag '$env:TAG' isn't a release tag. Tags look like v1.2.3." }
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -eq 1) { throw "Tag '$env:TAG' points at $env:GITHUB_SHA, which isn't on main. Only commits on main are released." }
+          if ($LASTEXITCODE -ne 0) { throw "Couldn't check that $env:GITHUB_SHA is on main (git exit code $LASTEXITCODE)." }
+          "RELEASE_VERSION=$($env:TAG.Substring(1))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "Releasing version $($env:TAG.Substring(1)) from $env:GITHUB_SHA"
 
       - name: Build
         shell: cmd
-        run: |
-          set TAG=${{ github.ref_name }}
-          call build.cmd %TAG:~1%
+        run: call build.cmd %RELEASE_VERSION%
 
       - name: Test
         shell: cmd
         run: call test.cmd
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: built
+          path: HdrSwitch.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    needs: build
+    runs-on: windows-latest
+    permissions: {}
+    env:
+      HAS_CERT: ${{ secrets.SIGNING_CERT_PFX != '' }}
+    steps:
+      # No checkout: this job holds the keys, so it runs nothing from the repository, only the steps below.
+      - name: Check the tag
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ($env:TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+\z') { throw "Tag '$env:TAG' isn't a release tag. Tags look like v1.2.3." }
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: built
 
       - name: Code-sign the exe
         if: env.HAS_CERT == 'true'
@@ -74,8 +128,30 @@ jobs:
           [IO.File]::WriteAllText("SHA256SUMS.txt.sig", [Convert]::ToBase64String($sig))
           if (-not $rsa.VerifyData($bytes, $sig, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) { throw "signature check failed" }
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: |
+            HdrSwitch.exe
+            SHA256SUMS.txt
+            SHA256SUMS.txt.sig
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+
       - name: Publish release
-        shell: pwsh
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" HdrSwitch.exe SHA256SUMS.txt SHA256SUMS.txt.sig --title "Display Switch ${{ github.ref_name }}" --generate-notes
+          GH_REPO: ${{ github.repository }}   # no checkout here, so gh is told the repository
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" HdrSwitch.exe SHA256SUMS.txt SHA256SUMS.txt.sig --verify-tag --title "Display Switch $TAG" --generate-notes
