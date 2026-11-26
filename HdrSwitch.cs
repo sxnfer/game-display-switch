@@ -2990,6 +2990,18 @@ namespace HdrSwitch
             catch (EntryPointNotFoundException) { return ""; }
         }
 
+        /// <summary>The monitor's own name ("LG 27GR95QE", from its EDID), or null if it can't be read.</summary>
+        public static string FriendlyName(Display d)
+        {
+            try
+            {
+                var t = new TargetName { H = Header(2, typeof(TargetName), d.Adapter, d.Target) };   // GET_TARGET_NAME
+                return DisplayConfigGetDeviceInfo(ref t) == 0 && !string.IsNullOrEmpty(t.Friendly) && t.Friendly.Trim().Length > 0 ? t.Friendly.Trim() : null;
+            }
+            catch (DllNotFoundException) { return null; }
+            catch (EntryPointNotFoundException) { return null; }
+        }
+
         /// <summary>The size of DISPLAYCONFIG_TARGET_DEVICE_NAME as marshalled: 420 bytes, as in the Windows SDK.</summary>
         internal static int TargetNameSize { get { return Marshal.SizeOf(typeof(TargetName)); } }
 

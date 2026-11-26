@@ -41,49 +41,189 @@ namespace HdrSwitch.Tests
         /// <summary>The flyout's S(): a length at scale k, rounded as the flyout rounds it.</summary>
         static int Px(double v, double k) { return (int)Math.Round(v * k); }
 
-        /// <summary>
-        /// Everything in the flyout but its list rows, built from the same parts as Rebuild: margin, status card (with the
-        /// update button and a notice of noticeH logical pixels), the group of three toggle rows, the switch-back row,
-        /// the list's header and foot, and the footer bar.
-        /// </summary>
-        static int FlyoutFixed(double k, bool choosing, bool update, int noticeH)
-        {
-            int M = Px(12, k), G = Px(8, k), CP = Px(12, k), row = Px(52, k);
-            int notice = noticeH > 0 ? Px(8, k) + Px(noticeH, k) : 0;
-            int updateY = CP + Px(28, k) + Px(16, k) + notice + Px(12, k);
-            int h1 = (update ? updateY + Px(32, k) : updateY - Px(12, k)) + CP;
-            int y = M + h1 + G + 3 * row + G + row + G;
-            return y + Px(40, k) + (choosing ? Px(52, k) : Px(4, k)) + G + Px(48, k);
-        }
-
-        /// <summary>The rows shown on a monitor of this height at scale k, taskbar 48 px (at 100 %) tall.</summary>
-        static int FlyoutRowsOn(int screenH, double k, bool choosing, bool update, int noticeH, int count)
+        /// <summary>The rows the Games tab shows on a monitor of this height at scale k, taskbar 48 px (at 100 %) tall.</summary>
+        static int FlyoutRowsOn(int screenH, double k, bool choosing, int count)
         {
             int workArea = screenH - Px(48, k);
-            int rows = TrayApp.FlyoutRows(workArea, Px(12, k), FlyoutFixed(k, choosing, update, noticeH), Px(44, k), count);
-            int fixedH = FlyoutFixed(k, choosing, update, noticeH);
+            int fixedH = TrayApp.GamesFixed((float)k, choosing);
+            int rows = TrayApp.FlyoutRows(workArea, Px(12, k), fixedH, Px(44, k), count);
             if (rows > 1) Run.True(fixedH + rows * Px(44, k) <= workArea - 2 * Px(12, k), "fits above the taskbar at " + k * 100 + " % on " + screenH + "p");
             return rows;
         }
 
         public static void FlyoutRowsFitTheWorkingArea()
         {
-            // A game's resolution view (the tallest list), 20 resolutions.
-            Run.Equal(5, FlyoutRowsOn(1080, 1.00, true, false, 0, 20), "1080p at 100 %: five rows");
-            Run.Equal(4, FlyoutRowsOn(1080, 1.50, true, false, 0, 20), "1080p at 150 %: four rows");
-            Run.Equal(1, FlyoutRowsOn(1080, 1.75, true, false, 0, 20), "1080p at 175 %: one row (five ran off the top), the list scrolls");
-            Run.Equal(1, FlyoutRowsOn(1080, 2.00, true, false, 0, 20), "1080p at 200 %: one row, the list scrolls");
-            Run.Equal(2, FlyoutRowsOn(1080, 1.50, true, true, 34, 20), "1080p at 150 % with an update button and a notice: two rows");
-            Run.Equal(5, FlyoutRowsOn(1440, 1.75, true, false, 0, 20), "1440p at 175 %: five rows");
-            Run.Equal(4, FlyoutRowsOn(1440, 2.00, true, false, 0, 20), "1440p at 200 %: four rows");
-            Run.Equal(2, FlyoutRowsOn(1440, 2.00, true, true, 34, 20), "1440p at 200 % with an update button and a notice: two rows");
-            // The games list: a shorter foot.
-            Run.Equal(3, FlyoutRowsOn(1080, 1.75, false, false, 0, 20), "games at 1080p 175 %: three rows");
-            Run.Equal(1, FlyoutRowsOn(1080, 2.00, false, false, 0, 20), "games at 1080p 200 %: one row");
+            // The parts around the list, as Rebuild lays them out: tab bar 48, 4 above the list, a view's note 52 (else
+            // 4), 8, the footer bar 48. The status card and the settings rows live in their own tabs now.
+            Run.Equal(112, TrayApp.GamesFixed(1, false), "the games list's frame at 100 %");
+            Run.Equal(160, TrayApp.GamesFixed(1, true), "a game's resolution view's frame at 100 %");
+            Run.Equal(320, TrayApp.GamesFixed(2, true), "… at 200 %");
+            // A game's resolution view (the tallest list), 20 resolutions. Before U1: 5, 5, 3, 1; U1: 5, 4, 1, 1.
+            Run.Equal(5, FlyoutRowsOn(1080, 1.00, true, 20), "1080p at 100 %: five rows");
+            Run.Equal(5, FlyoutRowsOn(1080, 1.50, true, 20), "1080p at 150 %: five rows (U1: four)");
+            Run.Equal(5, FlyoutRowsOn(1080, 1.75, true, 20), "1080p at 175 %: five rows (U1: one)");
+            Run.Equal(5, FlyoutRowsOn(1080, 2.00, true, 20), "1080p at 200 %: five rows (U1: one)");
+            Run.Equal(5, FlyoutRowsOn(1440, 1.75, true, 20), "1440p at 175 %: five rows");
+            Run.Equal(5, FlyoutRowsOn(1440, 2.00, true, 20), "1440p at 200 %: five rows (U1: four)");
+            Run.Equal(2, FlyoutRowsOn(720, 2.00, true, 20), "720p at 200 %: two rows, the list scrolls");
+            // The games list. Before U1: 4 at 175 %, 2 at 200 %; U1: 3 and 1.
+            Run.Equal(5, FlyoutRowsOn(1080, 1.75, false, 20), "games at 1080p 175 %: five rows (U1: three)");
+            Run.Equal(5, FlyoutRowsOn(1080, 2.00, false, 20), "games at 1080p 200 %: five rows (U1: one)");
             // Never more than the list has, never fewer than one.
-            Run.Equal(2, FlyoutRowsOn(1080, 1.00, false, false, 0, 2), "two games: two rows");
-            Run.Equal(1, FlyoutRowsOn(1080, 1.00, false, false, 0, 0), "no games: one row for the message");
+            Run.Equal(2, FlyoutRowsOn(1080, 1.00, false, 2), "two games: two rows");
+            Run.Equal(1, FlyoutRowsOn(1080, 1.00, false, 0), "no games: one row for the message");
             Run.Equal(1, TrayApp.FlyoutRows(300, 12, 800, 44, 20), "nothing fits: still one row");
+        }
+
+        /// <summary>
+        /// Live's height outside its scrolling body at scale k, as Rebuild lays it out: tab bar 48, the status (title 28,
+        /// line 16) and 8 below it, then 8 and the update's footer bar (52) – or, without an update, the 12 px margin.
+        /// </summary>
+        static int LiveFixed(double k, bool update)
+        {
+            return Px(48, k) + Px(28, k) + Px(16, k) + Px(8, k) + (update ? Px(8, k) + Px(52, k) : Px(12, k));
+        }
+
+        public static void FlyoutLiveAndSettingsScrollWhenTooTall()
+        {
+            // Live's body: five layer rows, 8, the recording card, 4 below: 52 × 6 + 12 at 100 %.
+            int body1 = 6 * 52 + 12, body2 = 6 * 104 + 24;
+            Run.Equal(body1, TrayApp.FlyoutBody(1032, 12, LiveFixed(1, true), body1, 52), "1080p at 100 %: all of it");
+            int body15 = 6 * 78 + 18;
+            Run.Equal(body15, TrayApp.FlyoutBody(1080 - 72, 18, LiveFixed(1.5, true), body15, 78), "1080p at 150 % with an update: all of it");
+            int shown = TrayApp.FlyoutBody(1080 - 96, 24, LiveFixed(2, true), body2, 104);
+            Run.True(shown < body2, "1080p at 200 % with an update: the body scrolls");
+            Run.Equal(984 - 48 - LiveFixed(2, true), shown, "… and fills the working area");
+            Run.Equal(104, TrayApp.FlyoutBody(500, 24, 600, body2, 104), "nothing fits: still one row");
+            Run.Equal(40, TrayApp.FlyoutBody(500, 24, 600, 40, 104), "never more than there is");
+        }
+
+        // ---- the tabs ----
+
+        public static void FlyoutTabsCycle()
+        {
+            Run.Equal(FlyoutTab.Games, TrayApp.NextTab(FlyoutTab.Live, 1), "Ctrl+Tab on Live: Games");
+            Run.Equal(FlyoutTab.Settings, TrayApp.NextTab(FlyoutTab.Games, 1), "Ctrl+Tab on Games: Settings");
+            Run.Equal(FlyoutTab.Live, TrayApp.NextTab(FlyoutTab.Settings, 1), "Ctrl+Tab on Settings: round to Live");
+            Run.Equal(FlyoutTab.Settings, TrayApp.NextTab(FlyoutTab.Live, -1), "Ctrl+Shift+Tab on Live: round to Settings");
+            Run.Equal(FlyoutTab.Live, TrayApp.NextTab(FlyoutTab.Games, -1), "Left on Games: Live");
+            var t = FlyoutTab.Games;
+            for (int i = 0; i < 3; i++) t = TrayApp.NextTab(t, 1);
+            Run.Equal(FlyoutTab.Games, t, "three steps: back where it started");
+        }
+
+        public static void FlyoutOpensOnLiveWhenSomethingRuns()
+        {
+            Run.Equal(FlyoutTab.Live, TrayApp.OpeningTab(true, false, FlyoutTab.Settings), "a game runs: Live, whatever was used last");
+            Run.Equal(FlyoutTab.Live, TrayApp.OpeningTab(false, true, FlyoutTab.Games), "paused, counting down or held for a recorder: Live");
+            Run.Equal(FlyoutTab.Games, TrayApp.OpeningTab(false, false, FlyoutTab.Games), "nothing going on: the tab used last");
+            Run.Equal(FlyoutTab.Settings, TrayApp.OpeningTab(false, false, FlyoutTab.Settings), "… Settings too");
+            Run.Equal(FlyoutTab.Live, TrayApp.OpeningTab(false, false, FlyoutTab.Live), "first time: Live");
+        }
+
+        // ---- Live: the layer stack and the status line ----
+
+        static Resolution.Mode Mode(int w, int h) { return new Resolution.Mode { Width = w, Height = h, Hz = 240 }; }
+
+        /// <summary>"hdr=ON*" …: each layer's value, a star when it is in effect.</summary>
+        static string Layers(TrayApp.LiveState s)
+        {
+            var parts = new List<string>();
+            foreach (var l in TrayApp.LiveLayers(s)) parts.Add(l.Key + "=" + l.Value + (l.Active ? "*" : ""));
+            return string.Join(" ", parts.ToArray());
+        }
+
+        static TrayApp.LiveLayer Layer(TrayApp.LiveState s, string key) { return TrayApp.LiveLayers(s).Find(l => l.Key == key); }
+
+        static string Status(TrayApp.LiveState s)
+        {
+            string title, sub;
+            TrayApp.LiveStatus(s, out title, out sub);
+            return title + " | " + sub;
+        }
+
+        public static void LiveIdle()
+        {
+            var s = new TrayApp.LiveState();
+            Run.Equal("hdr=— bright=— area=— stretch=— scaling=—", Layers(s), "no game: every layer dimmed, a dash");
+            Run.Equal("Waiting for a game | HDR off", Status(s), "the status");
+            Run.Equal("HDR,SDR brightness,Competitive area,Stretch,NVIDIA scaling", string.Join(",", TrayApp.LiveLayers(s).ConvertAll(l => l.Title).ToArray()), "the order of the stack");
+            s.HdrElsewhere = true;
+            Run.Equal("hdr=On", Layers(s).Split(' ')[0], "HDR turned on in Windows: On, but not lit");
+            Run.Equal("Waiting for a game | HDR is on, turned on outside Display Switch", Status(s), "… and said so");
+            Run.Equal("No HDR display | Check Windows display settings", Status(new TrayApp.LiveState { HdrSupported = false }), "no HDR display");
+        }
+
+        public static void LiveHdrGameWithBrightness()
+        {
+            var s = new TrayApp.LiveState { Game = "Cyberpunk 2077", GameHdr = true, GameBrightness = true, HdrOurs = true, Brightness = 40, BackTo = "SDR", Screen = "LG 27GR95QE" };
+            Run.Equal("hdr=ON* bright=40 of 100* area=Off stretch=Off scaling=Unchanged", Layers(s), "HDR and the game's SDR brightness");
+            Run.Equal("Turned on by Display Switch", Layer(s, "hdr").Desc, "who turned HDR on");
+            Run.Equal("Not set for this game", Layer(s, "area").Desc, "no competitive area for it");
+            Run.Equal("Cyberpunk 2077 | LG 27GR95QE · back to SDR 3 s after it closes", Status(s), "the game, its screen and the wait");
+            s.Delay = 30;
+            Run.Equal("Cyberpunk 2077 | LG 27GR95QE · back to SDR 30 s after it closes", Status(s), "the wait chosen in Settings");
+            s.Brightness = -1;
+            s.BrightnessLeft = true;
+            Run.Equal("bright=Windows'", Layers(s).Split(' ')[1], "the slider moved by hand: Windows' own");
+            Run.Equal("Your level, left as you set it", Layer(s, "bright").Desc, "… and why");
+        }
+
+        public static void LiveCompetitiveAndStretch()
+        {
+            var s = new TrayApp.LiveState { Game = "VALORANT", GameHdr = true, GameArea = true, GameStretch = true, HdrOurs = true, BackTo = "SDR",
+                Area = Mode(2368, 1332), Stretch = Mode(1776, 1332), AreaDetail = "92.5 % · 24.5″" };
+            Run.Equal("hdr=ON* bright=Windows' area=2368 × 1332* stretch=1776 × 1332* scaling=Unchanged", Layers(s), "area and stretch in effect, scaling left alone");
+            Run.Equal("Centred, 92.5 % · 24.5″", Layer(s, "area").Desc, "how much of the panel");
+            Run.Equal("Stretched over 2368 × 1332", Layer(s, "stretch").Desc, "stretched over the area");
+            Run.Equal("Left alone: a stretched game doesn't need it", Layer(s, "scaling").Desc, "why scaling is unchanged");
+            s.StretchLost = true;
+            Run.Equal("The game set its own mode since", Layer(s, "stretch").Desc, "the game's own mode took over");
+            var area = new TrayApp.LiveState { Game = "cs2.exe", GameArea = true, Area = Mode(2368, 1332), BackTo = "2560 × 1440" };
+            Run.Equal("hdr=Off bright=Windows' area=2368 × 1332* stretch=Off scaling=Unchanged", Layers(area), "an area alone, no HDR for the game");
+            Run.Equal("cs2.exe | back to 2560 × 1440 3 s after it closes", Status(area), "the desktop's resolution comes back");
+        }
+
+        public static void LiveScalingTaken()
+        {
+            var s = new TrayApp.LiveState { Game = "Counter-Strike 2", GameArea = true, Area = Mode(2368, 1332), ScalingTaken = true, BackTo = "2560 × 1440" };
+            Run.True(Layer(s, "scaling").Active && Layer(s, "scaling").Value == "No scaling", "No scaling, set by this app");
+            Run.Equal("Set automatically, put back after", Layer(s, "scaling").Desc, "… and put back");
+            var stray = new TrayApp.LiveState { ScalingStray = true };
+            Run.True(Layer(stray, "scaling").Active && Layer(stray, "scaling").Value == "No scaling", "still to put back, no game");
+            Run.Equal("Still to be put back", Layer(stray, "scaling").Desc, "… said so");
+        }
+
+        public static void LiveGraceCountdown()
+        {
+            var s = new TrayApp.LiveState { HdrOurs = true, GraceLeft = 2, BackTo = "SDR", Screen = "LG 27GR95QE", Area = Mode(2368, 1332), ScalingTaken = true };
+            Run.Equal("Switching back | LG 27GR95QE · back to SDR in 2s", Status(s), "the countdown");
+            Run.Equal("hdr=ON* bright=— area=2368 × 1332* stretch=— scaling=No scaling*", Layers(s), "what is still switched, until it goes back");
+            s.GraceLeft = 0;
+            Run.Equal("Switching back | LG 27GR95QE · back to SDR in 1s", Status(s), "never says 0s");
+            var mode = new TrayApp.LiveState { GraceLeft = 10, BackTo = "2560 × 1440", Area = Mode(2368, 1332) };
+            Run.Equal("Switching back | back to 2560 × 1440 in 10s", Status(mode), "a resolution alone: the desktop's comes back");
+        }
+
+        public static void LivePaused()
+        {
+            var s = new TrayApp.LiveState { Paused = true, Game = "Counter-Strike 2", GameHdr = true, GameArea = true, GameBrightness = true };
+            Run.Equal("Paused | Nothing switches · Ctrl+Alt+H resumes", Status(s), "paused, a game running");
+            Run.Equal("hdr=Off bright=Windows' area=Off stretch=Off scaling=Unchanged", Layers(s), "everything went back");
+            Run.Equal("Paused", Layer(s, "hdr").Desc, "the reason on each layer");
+            Run.Equal("Paused | Nothing switches · Ctrl+Alt+H resumes", Status(new TrayApp.LiveState { Paused = true }), "paused, no game");
+        }
+
+        public static void LiveRecordingHold()
+        {
+            var s = new TrayApp.LiveState { Game = "Counter-Strike 2", GameHdr = true, GameArea = true, Area = Mode(2368, 1332), ScalingTaken = true,
+                RecordingOn = true, Recorder = "OBS Studio", BackTo = "2560 × 1440" };
+            Run.Equal("hdr=Off bright=Windows' area=2368 × 1332* stretch=Off scaling=No scaling*", Layers(s), "HDR held off, the area still on");
+            Run.Equal("Held off: OBS Studio is running", Layer(s, "hdr").Desc, "who holds HDR off");
+            Run.Equal("Counter-Strike 2 | back to 2560 × 1440 3 s after it closes", Status(s), "the status");
+            s.Area = null;
+            s.ScalingTaken = false;
+            Run.Equal("Counter-Strike 2 | HDR held off while recording", Status(s), "nothing switched at all: why");
         }
 
         public static void FlyoutEnterAfterTheMouse()
