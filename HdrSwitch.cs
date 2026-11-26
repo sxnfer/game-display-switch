@@ -1356,7 +1356,7 @@ namespace HdrSwitch
             "# The resolution must be in Windows' list: create it in NVIDIA Control Panel > Change resolution > Customize.",
             "# For a game in borderless (fullscreen windowed) mode, add  stretch 1776x1332  after the resolution: the game",
             "# then runs at that lower resolution, stretched over the competitive one. It has to fit inside it.",
-            "# Easier: click the tray icon, then the monitor symbol next to a game. Changes apply as soon as you save.",
+            "# Easier: the tray icon, Games, then the game: its page sets both. Changes apply as soon as you save.",
             ""
         };
 
@@ -1622,7 +1622,7 @@ namespace HdrSwitch
             "# Display Switch - SDR content brightness per game: Windows' slider of that name (0-100), set while the game",
             "# runs with HDR on and put back when it closes. It decides how bright the desktop, SDR games and a game's",
             "# SDR menus look in HDR. One game per line: exe and level. Text after # is a note. Easier: the flyout's",
-            "# monitor symbol next to a game, then SDR brightness.",
+            "# Games tab, then the game: SDR brightness on its page.",
             ""
         };
 
