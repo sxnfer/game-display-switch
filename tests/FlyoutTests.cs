@@ -60,7 +60,7 @@ namespace HdrSwitch.Tests
             Run.Equal(112, TrayApp.GamesFixed(1, false, false), "the programs to add, at 100 %");
             Run.Equal(160, TrayApp.GamesFixed(1, true, false), "a game's resolution list's frame at 100 %");
             Run.Equal(320, TrayApp.GamesFixed(2, true, false), "… at 200 %");
-            // A game's resolution view (the tallest list), 20 resolutions. Before U1: 5, 5, 3, 1; U1: 5, 4, 1, 1.
+            // A game's resolution list (the tallest list), 20 resolutions. Before U1: 5, 5, 3, 1; U1: 5, 4, 1, 1.
             Run.Equal(5, FlyoutRowsOn(1080, 1.00, true, 20), "1080p at 100 %: five rows");
             Run.Equal(5, FlyoutRowsOn(1080, 1.50, true, 20), "1080p at 150 %: five rows (U1: four)");
             Run.Equal(5, FlyoutRowsOn(1080, 1.75, true, 20), "1080p at 175 %: five rows (U1: one)");

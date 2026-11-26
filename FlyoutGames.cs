@@ -154,7 +154,7 @@ namespace HdrSwitch
 
             /// <summary>
             /// The level dragged or stepped to is saved to brightness.txt – and applied, if the game runs with HDR on
-            /// (SetBrightness, as the old level list did).
+            /// (SetBrightness, as choosing a level always has).
             /// </summary>
             void CommitBrightness()
             {
