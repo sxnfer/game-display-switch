@@ -72,6 +72,25 @@ namespace HdrSwitch
             return Modes(gdi, hz).Any(m => m.Width == w && m.Height == h);
         }
 
+        /// <summary>The refresh rates at which the display offers this size, lowest first. For the switch log only.</summary>
+        public static List<int> Rates(string gdi, int w, int h)
+        {
+            var rates = new SortedSet<int>();
+            for (int i = 0; ; i++)
+            {
+                var dm = NewMode();
+                if (!EnumDisplaySettingsExW(gdi, i, ref dm, 0)) break;
+                if (dm.dmBitsPerPel != 32 || dm.dmDisplayOrientation != 0) continue;
+                if ((int)dm.dmPelsWidth == w && (int)dm.dmPelsHeight == h) rates.Add((int)dm.dmDisplayFrequency);
+            }
+            return rates.ToList();
+        }
+
+        // For the switch log only – nothing decides by these. LastCds: what ChangeDisplaySettingsEx answered the last
+        // time a mode was set, saved or restored. LastStretch: how the last ApplyStretched went, step by step.
+        internal static int LastCds;
+        internal static string LastStretch;
+
         /// <summary>
         /// Switches the desktop on this display to w×h at hz, centred on the panel, until Restore (or a reboot).
         /// Nothing is written to the registry.
@@ -84,7 +103,7 @@ namespace HdrSwitch
             dm.dmDisplayFrequency = (uint)hz;
             dm.dmDisplayFixedOutput = DMDFO_CENTER;
             dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_DISPLAYFIXEDOUTPUT;
-            return ChangeDisplaySettingsExW(gdi, ref dm, IntPtr.Zero, CDS_FULLSCREEN, IntPtr.Zero) == DISP_CHANGE_SUCCESSFUL;
+            return (LastCds = ChangeDisplaySettingsExW(gdi, ref dm, IntPtr.Zero, CDS_FULLSCREEN, IntPtr.Zero)) == DISP_CHANGE_SUCCESSFUL;
         }
 
         /// <summary>Switches to this mode and saves it in display settings, as the Settings app does.</summary>
@@ -95,7 +114,7 @@ namespace HdrSwitch
             dm.dmPelsHeight = (uint)m.Height;
             dm.dmDisplayFrequency = (uint)m.Hz;
             dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
-            return ChangeDisplaySettingsExW(gdi, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero) == DISP_CHANGE_SUCCESSFUL;
+            return (LastCds = ChangeDisplaySettingsExW(gdi, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero)) == DISP_CHANGE_SUCCESSFUL;
         }
 
         /// <summary>The desktop is in the mode saved in display settings.</summary>
@@ -108,7 +127,7 @@ namespace HdrSwitch
         /// <summary>Back to the mode saved in display settings, scaling included.</summary>
         public static bool Restore(string gdi)
         {
-            return ChangeDisplaySettingsExW(gdi, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero) == DISP_CHANGE_SUCCESSFUL;
+            return (LastCds = ChangeDisplaySettingsExW(gdi, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero)) == DISP_CHANGE_SUCCESSFUL;
         }
 
         /// <summary>
@@ -118,15 +137,21 @@ namespace HdrSwitch
         /// </summary>
         public static bool ApplyStretched(string gdi, int w, int h, int hz, int areaW, int areaH)
         {
+            LastStretch = "does-not-fit";
             if (w > areaW || h > areaH) return false;
             var now = Current(gdi);
+            LastStretch = "no-current-mode";
             if (now == null) return false;
             // In one step where it can be: the size and the region together. Another refresh rate, or a desktop layout
             // Windows won't take as supplied (more displays), needs the mode set first.
-            if (now.Hz == hz && Aim(gdi, w, h, areaW, areaH)) return true;
-            if (!Apply(gdi, w, h, hz)) return false;
-            if (Aim(gdi, w, h, areaW, areaH)) return true;
+            LastStretch = lastAim = "";
+            if (now.Hz == hz && Aim(gdi, w, h, areaW, areaH)) { LastStretch = "one-step(" + lastAim + ")"; return true; }
+            string first = now.Hz == hz ? "one-step(" + lastAim + ")," : "one-step(skipped:hz-differs),";
+            if (!Apply(gdi, w, h, hz)) { LastStretch = first + "set-mode(cds=" + LastCds + ")"; return false; }
+            if (Aim(gdi, w, h, areaW, areaH)) { LastStretch = first + "set-mode(ok),aim(" + lastAim + ")"; return true; }
+            string aim = lastAim;
             Restore(gdi);
+            LastStretch = first + "set-mode(ok),aim(" + aim + "),restored";
             return false;
         }
 
@@ -143,13 +168,17 @@ namespace HdrSwitch
             }
         }
 
+        static string lastAim;   // how the last Aim went, for LastStretch
+
         /// <summary>Sets the desktop size and aims it at the centred area: the path's desktop image region. Not saved.</summary>
         static bool Aim(string gdi, int w, int h, int areaW, int areaH)
         {
             using (var c = Query(gdi))
             {
+                lastAim = "no-display-config";
                 if (c == null) return false;
                 int tw = Marshal.ReadInt32(c.Target, 40), th = Marshal.ReadInt32(c.Target, 44);
+                lastAim = "does-not-fit:signal=" + tw + "x" + th;
                 if (w > areaW || h > areaH || areaW > tw || areaH > th) return false;   // only ever enlarging – see the top of this file
                 int x = (tw - areaW) / 2, y = (th - areaH) / 2;
                 Marshal.WriteInt32(c.Source, 16, w);
@@ -159,7 +188,9 @@ namespace HdrSwitch
                 int[] info = { tw, th, x, y, x + areaW, y + areaH, 0, 0, w, h };
                 Marshal.Copy(info, 0, (IntPtr)((long)c.Desktop + 16), info.Length);
                 c.Paths[c.Path].Target.Scaling = 1;   // identity: the path's surface is the signal itself, the region does the rest
-                return SetDisplayConfig(c.PathCount, c.Paths, c.ModeCount, c.Modes, SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE) == 0;
+                int r = SetDisplayConfig(c.PathCount, c.Paths, c.ModeCount, c.Modes, SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE);
+                lastAim = "sdc=" + r + ":signal=" + tw + "x" + th;
+                return r == 0;
             }
         }
 
