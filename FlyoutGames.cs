@@ -90,10 +90,21 @@ namespace HdrSwitch
                 catch (Exception e) { Guard.Log("Reading Windows' SDR brightness", e); return -1; }
             }
 
+            /// <summary>
+            /// The display the open game's resolution goes on, as ApplyResolution picks it: the screen the game was on last
+            /// time if it is connected, else the main one (Follow.TargetDisplay). Its sizes, rates and panel are what the
+            /// page, its lists and the creator show.
+            /// </summary>
+            string PageGdi()
+            {
+                string why;
+                return app.TargetGdiFor(page, out why);
+            }
+
             bool ReadNvidia()
             {
                 if (sample != null) return sample.Nvidia;
-                try { return Nvidia.Scaling(TargetGdi()) >= 0; }
+                try { return Nvidia.Scaling(PageGdi()) >= 0; }
                 catch (Exception e) { Guard.Log("Asking the NVIDIA driver", e); return false; }
             }
 
@@ -146,6 +157,7 @@ namespace HdrSwitch
             /// <summary>An arrow, Page Up/Down, Home or End on the slider: shown at once, saved once the keys rest.</summary>
             void StepSlider(int delta)
             {
+                if (sub == "create") { StepCreator(delta); return; }   // the creator's slider: the size, not a brightness
                 slideLevel = StepBrightness(ShownLevel(), windowsLevel, delta);
                 brightSave.Stop();
                 brightSave.Start();
@@ -190,7 +202,7 @@ namespace HdrSwitch
             void ScreenNow(out string gdi, out Resolution.Mode full, out double inches)
             {
                 if (sample != null) { gdi = null; full = sample.Full; inches = sample.Inches; return; }
-                gdi = TargetGdi();
+                gdi = PageGdi();
                 var cur = Resolution.Current(gdi);
                 var pic = Resolution.Read(gdi);   // the panel's own size is the target of the display path
                 full = pic != null ? new Resolution.Mode { Width = pic.TargetW, Height = pic.TargetH, Hz = cur != null ? cur.Hz : 0 } : cur;
@@ -211,7 +223,7 @@ namespace HdrSwitch
                 Resolution.Mode chosen;
                 app.profiles.TryGetValue(game, out chosen);
                 if (chosen != null && chosen.Hz > 0) return chosen.Hz;
-                var cur = sample != null ? sample.Current : Resolution.Current(TargetGdi());
+                var cur = sample != null ? sample.Current : Resolution.Current(PageGdi());
                 return cur != null ? cur.Hz : 60;
             }
 
@@ -219,6 +231,7 @@ namespace HdrSwitch
             int BuildGames(int W, int M, int y)
             {
                 if (page != null && sub == null) return BuildPage(W, M, y);
+                if (page != null && sub == "create") return BuildCreator(W, M, y);
                 if (page == null && !picking) return BuildLibrary(W, M, y);
                 return BuildList(W, M, y);
             }
@@ -250,8 +263,8 @@ namespace HdrSwitch
                 } });
                 Resolution.Mode area = null;
                 if (page != null) app.profiles.TryGetValue(page, out area);
-                string head = picking ? "Add a program" : sub == "res" ? "Competitive area" : "Stretch";
-                string headRight = picking ? "" : sub == "res" ? "at " + HzFor(page) + " Hz" : area != null ? "inside " + area.Text : "";
+                string head = picking ? "Add a program" : sub == "create" ? "Create a size" : sub == "res" ? "Competitive area" : "Stretch";
+                string headRight = picking ? "" : sub == "create" ? CreatorMonitor() : sub == "res" ? "at " + HzFor(page) + " Hz" : area != null ? "inside " + area.Text : "";
                 string forGame = page != null ? " for " + app.DisplayName(page) : "";
                 int rightW = headRight.Length == 0 ? 0 : TextRenderer.MeasureText(headRight, fonts.Caption, Size.Empty, TfMeasure).Width + S(8);
                 int hx = back.Right + S(8);
@@ -439,7 +452,7 @@ namespace HdrSwitch
                 y = st.Bottom + G;
                 int top = y, from = items.Count;
 
-                string hint = SetupHint(gi, app.notice, gi.Area == null || Offered(gdi, gi.Area, hz), gi.Stretch == null || Offered(gdi, gi.Stretch, hz), hz);
+                string hint = SetupHint(gi, app.notice, gi.Area == null || Offered(gdi, gi.Area, hz), gi.Stretch == null || Offered(gdi, gi.Stretch, hz), hz, app.ProblemOf(name));
                 if (hint != null) y += HintBar(new Rectangle(M, y, cw, 0), hint) + G;
 
                 // HDR: on, or never.
@@ -468,7 +481,7 @@ namespace HdrSwitch
             }
 
             /// <summary>
-            /// A setup hint on the page, as WinUI's InfoBar (warning): what has to be created in NVIDIA Control Panel, or
+            /// A setup hint on the page, as WinUI's InfoBar (warning): what has to be created (in the creator or NVIDIA Control Panel), or
             /// the latest notification about this game. Returns its height.
             /// </summary>
             int HintBar(Rectangle r, string text)
@@ -641,37 +654,10 @@ namespace HdrSwitch
                 var scr = new Rectangle(row.X + S(46), row.Bottom + S(10), pw, ph);
                 items.Add(new Item { Rect = scr, Key = "preview", Role = AccessibleRole.StaticText,
                     Name = "Competitive area " + label + (stretch != null ? ", " + stretch.Text + " stretched over it" : ""), Paint = (g, rc, lk) =>
-                {
-                    // The screen: dark in every mode, as a screen is; in high contrast the window colours.
-                    Color screen = P.HighContrast ? P.Surface : Color.FromArgb(0x0B, 0x0B, 0x0D);
-                    Color line = P.HighContrast ? P.Accent : Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF);
-                    Color ink = P.HighContrast ? P.Text1 : Color.White;
-                    Theme.Fill(g, rc, S(4), screen);
-                    Outline(g, rc, S(4), P.HighContrast ? P.Text1 : P.ControlStroke);
-                    Func<RectangleF, RectangleF> on_ = f => new RectangleF(rc.X + f.X * rc.Width, rc.Y + f.Y * rc.Height, f.Width * rc.Width, f.Height * rc.Height);
-                    var ar = on_(pic.Area);
-                    if (stretch != null)
-                    {
-                        // The game's own resolution at its own size, which the GPU stretches over the area: stripes.
-                        var sr2 = on_(pic.Stretch);
-                        var st = g.Save();
-                        g.SetClip(sr2, CombineMode.Intersect);
-                        using (var b = new SolidBrush(P.HighContrast ? Theme.Fade(P.Text2, 0.3) : Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF)))
-                            for (float x = sr2.X; x < sr2.Right; x += S(10)) g.FillRectangle(b, x, sr2.Y, S(5), sr2.Height);
-                        g.Restore(st);
-                        using (var pen = new Pen(Theme.Fade(line, 0.55), 1) { DashStyle = DashStyle.Dash })
-                            g.DrawRectangle(pen, sr2.X, sr2.Y, sr2.Width - 1, sr2.Height - 1);
-                    }
-                    using (var pen = new Pen(line, Math.Max(1.5f, 1.5f * k)))
-                    using (var p = Theme.Round(RectangleF.Inflate(ar, -0.75f * k, -0.75f * k), S(2))) g.DrawPath(pen, p);
-                    string l1 = stretch != null ? stretch.Text + " stretched" : label, l2 = stretch != null ? "over " + label : null;
-                    int lh = S(16);
-                    int ly = rc.Y + (rc.Height - (l2 != null ? 2 * lh : lh)) / 2;
-                    Draw(g, l1, fonts.Caption, ink, new Rectangle(rc.X, ly, rc.Width, lh), TfCenter);
-                    if (l2 != null) Draw(g, l2, fonts.Caption, ink, new Rectangle(rc.X, ly + lh, rc.Width, lh), TfCenter);
-                } });
+                    ScreenPicture(g, rc, pic, stretch != null, stretch != null ? stretch.Text + " stretched" : label, stretch != null ? "over " + label : null) });
 
-                // The size: the one chosen, and More… for the full list (at the rate it is switched at).
+                // The size: the one chosen, More… for the full list (at the rate it is switched at), and Create… for one
+                // the display doesn't have yet (FlyoutCreator.cs).
                 var seg = new Rectangle(scr.X, scr.Bottom + S(8), pw, S(32));
                 items.Add(new Item { Rect = seg, Paint = (g, rc, lk) =>
                 {
@@ -680,12 +666,16 @@ namespace HdrSwitch
                 } });
                 string cur = area.Hz > 0 ? area.Text + " @ " + area.Hz + " Hz" : area.Text;
                 int moreW = TextRenderer.MeasureText("More…", fonts.Label, Size.Empty, TfMeasure).Width + S(32);
-                var curR = new Rectangle(seg.X + S(2), seg.Y + S(2), seg.Width - S(4) - moreW, seg.Height - S(4));
+                int newW = TextRenderer.MeasureText("Create…", fonts.Label, Size.Empty, TfMeasure).Width + S(24);
+                var curR = new Rectangle(seg.X + S(2), seg.Y + S(2), seg.Width - S(4) - moreW - newW, seg.Height - S(4));
                 var moreR = new Rectangle(curR.Right, curR.Y, moreW, curR.Height);
+                var newR = new Rectangle(moreR.Right, curR.Y, newW, curR.Height);
                 items.Add(new Item { Rect = curR, Key = "seg:area", On = true, Role = AccessibleRole.RadioButton, Selected = true, Radius = S(3),
                     Name = "Competitive area " + cur, Tip = "Choose another size", Click = () => OpenSub("res", "seg:area"), Paint = (g, rc, lk) => Segment(g, rc, lk, cur) });
                 items.Add(new Item { Rect = moreR, Key = "seg:more", Radius = S(3), Name = "More sizes", Tip = "Every size the display has, at " + HzFor(name) + " Hz",
                     Click = () => OpenSub("res", "seg:more"), Paint = (g, rc, lk) => Segment(g, rc, lk, "More…") });
+                items.Add(new Item { Rect = newR, Key = "seg:create", Radius = S(3), Name = "Create a size", Tip = "A size the display doesn't have yet, by its diagonal",
+                    Click = () => OpenCreator("seg:create"), Paint = (g, rc, lk) => Segment(g, rc, lk, "Create…") });
                 return row.Bottom + expH;
             }
 
@@ -788,9 +778,16 @@ namespace HdrSwitch
                 {
                     string note = stretchList
                         ? "For borderless games. Stretched by the GPU over " + (chosen != null ? chosen.Text : "the area") + "."
-                        : "Missing one? Create it in NVIDIA Control Panel, at " + hz + " Hz.";
-                    items.Add(new Item { Rect = new Rectangle(c3.X + S(4), listClip.Bottom + S(4), c3.Width - S(8), footH - S(8)), Paint = (g, rc, lk) =>
+                        : "Missing a size? Create it by its diagonal, at " + hz + " Hz.";
+                    // The area's list ends with the way to a size the display doesn't have yet: the creator.
+                    const string CreateText = "Create a size…";
+                    int createW = stretchList ? 0 : TextRenderer.MeasureText(CreateText, fonts.Body, Size.Empty, TfMeasure).Width + S(24);
+                    items.Add(new Item { Rect = new Rectangle(c3.X + S(4), listClip.Bottom + S(4), c3.Width - S(8) - (createW > 0 ? createW + S(8) : 0), footH - S(8)), Paint = (g, rc, lk) =>
                         Draw(g, note, fonts.Caption, t2, rc, TextFormatFlags.NoPadding | TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.VerticalCenter) });
+                    if (createW > 0)
+                        items.Add(new Item { Rect = new Rectangle(c3.Right - S(4) - createW, listClip.Bottom + (footH - S(32)) / 2, createW, S(32)), Key = "create", Name = "Create a size",
+                            Tip = "A size the display doesn't have yet, by its diagonal", Click = () => OpenCreator("create"),
+                            Paint = (g, rc, lk) => StandardButton(g, rc, lk, sbg, null, CreateText) });
                 }
                 y = c3.Bottom + G;
                 string file = FlyoutFile(picking ? "add" : sub, false);

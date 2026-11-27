@@ -99,6 +99,7 @@ namespace HdrSwitch
             bool entered;         // a view was just entered: the keyboard starts on its first row
             bool returned;        // just back from a view: the keyboard is on the control that opened it
             bool repeat;          // the key being handled is held down (auto-repeat): it moves, but never presses
+            bool logEmpty;        // Settings' Switch log row was asked to open a log with nothing in it yet: the row says so
             int wheel;            // what the wheel moved that is less than a pixel, kept for its next turn
             string screenName;    // the monitor it opened on: it stays there until it closes
             readonly Spring open = Motion.Open(0);           // 0 hidden → 1 in place: it slides in from the taskbar
@@ -363,7 +364,7 @@ namespace HdrSwitch
             protected override void OnDeactivate(EventArgs e)
             {
                 base.OnDeactivate(e);
-                if (Visible && !closing) Dismiss(false);
+                if (Visible && !closing && !KeepOpen()) Dismiss(false);   // not under a UAC prompt or a folder dialog of its own
             }
 
             /// <summary>Every key passes here first: notes whether it is held down, which Windows marks in bit 30.</summary>
@@ -513,6 +514,7 @@ namespace HdrSwitch
             /// <summary>The back button, Backspace and Esc: one view up.</summary>
             void GoBack()
             {
+                if (sub == "create" && CreatorBack()) return;   // the creator's confirmation and result go back to its form first
                 if (sub != null) sub = null;
                 else if (page != null) LeavePage();
                 else picking = false;
@@ -1134,9 +1136,10 @@ namespace HdrSwitch
             // ---- Settings: everything that isn't per game ----
 
             /// <summary>
-            /// The Settings tab, in two groups as Windows' Settings has them. Switching: the wait before switching back,
-            /// SDR while recording, the pause shortcut. App: start with Windows, the island, updates. The footer bar says
-            /// where the files are, opens that folder, and exits.
+            /// The Settings tab, in groups as Windows' Settings has them. Switching: the wait before switching back,
+            /// SDR while recording, the pause shortcut. Resolutions: CRU's folder and the resolutions added to a monitor
+            /// (FlyoutCreator.cs). App: start with Windows, the island, updates, the switch log. The
+            /// footer bar says where the files are, opens that folder, and exits.
             /// </summary>
             int BuildSettings(int W, int M, int y)
             {
@@ -1181,9 +1184,11 @@ namespace HdrSwitch
                 } });
                 y += 3 * rowCH;
 
+                y = SettingsResolutions(M, cw, y, rowCH, secH);
+
                 Section("App", M, y, secH);
                 y += secH;
-                Group(new Rectangle(M, y, cw, 3 * rowCH), 3);
+                Group(new Rectangle(M, y, cw, 4 * rowCH), 4);
                 CardToggle(new Rectangle(M, y, cw, rowCH), "startup", "power", "Start with Windows", "Runs in the tray", IsStartupNow(), true, false,
                     () => { SetStartup(!IsStartup()); Rebuild(); }, false);
                 CardToggle(new Rectangle(M, y + rowCH, cw, rowCH), "island", "island", "Island", "A pill at the top of the screen", app.islandOn, false, false,
@@ -1203,7 +1208,21 @@ namespace HdrSwitch
                     Draw(g, version, fonts.Caption, P.Ink(P.Text2, P.CardSolid), new Rectangle(vx, rc.Y, verW, rc.Height), TfLeft | TextFormatFlags.Right);
                 } });
                 if (hasUpdate) UpdateButton(new Rectangle(ur.Right - S(12) - btnW, ur.Y + (rowCH - S(32)) / 2, btnW, S(32)), P.CardSolid);
-                y += 3 * rowCH;
+                // The switch log: every HDR, resolution and scaling decision, one line each (SwitchLog.cs). Open shows it
+                // in the editor Windows opens .log files with.
+                var lr = new Rectangle(M, y + 3 * rowCH, cw, rowCH);
+                int logW = TextRenderer.MeasureText("Open", fonts.Body, Size.Empty, TfMeasure).Width + S(24);
+                string logDesc = logEmpty ? "Empty so far: nothing has been switched yet" : "What Display Switch did, line by line";
+                items.Add(new Item { Rect = lr, Key = "switchlog", Role = AccessibleRole.StaticText, Name = "Switch log", Tip = logDesc,
+                    Paint = (g, rc, lk) => RowText(g, rc, "log", "Switch log", logDesc, 0, S(12) + logW + S(12)) });
+                items.Add(new Item { Rect = new Rectangle(lr.Right - S(12) - logW, lr.Y + (rowCH - S(32)) / 2, logW, S(32)), Key = "openlog", Name = "Open the switch log", Tip = SwitchLog.LogFile, Click = () =>
+                {
+                    if (sample != null) return;
+                    logEmpty = !OpenSwitchLog();
+                    if (logEmpty) Rebuild();
+                    else Dismiss(true);   // at once: the editor is about to come to the front
+                }, Paint = (g, rc, lk) => StandardButton(g, rc, lk, P.CardSolid, null, "Open") });
+                y += 4 * rowCH;
                 int content = y - top + S(4);
 
                 // The footer bar: where the files are, open that folder, exit.
@@ -1303,6 +1322,8 @@ namespace HdrSwitch
                 public bool Nvidia = true;     // an NVIDIA driver runs the display
                 public int WindowsLevel = 20;  // Windows' own SDR brightness
                 public int Grace = -1;         // seconds left of the wait before switching back, or -1
+                public string Creator = "ready";   // the creator's state: no-cru, ready, exists, confirm, busy, done, failed
+                public List<string> Backups = new List<string>();   // the monitors resolutions were added to
             }
 
             internal Sample sample;   // null: ask Windows, as always
@@ -1327,8 +1348,9 @@ namespace HdrSwitch
                 rolls.Clear();
                 picking = view == "add";
                 search = find ?? "";
-                if (view == "game" || view == "res" || view == "stretch") EnterPage(game);
-                sub = view == "res" || view == "stretch" ? view : null;
+                if (view == "game" || view == "res" || view == "stretch" || view == "creator") EnterPage(game);
+                sub = view == "res" || view == "stretch" ? view : view == "creator" ? "create" : null;
+                if (view == "creator") SampleCreator();
                 brightOpen = expand == "brightness";
                 rounded = win11;
                 Rebuild();
@@ -1458,7 +1480,7 @@ namespace HdrSwitch
 
             /// <summary>
             /// A 16 px line icon, centred in box, drawn like Segoe Fluent's (and the mockup's): the five layers (hdr,
-            /// bright, area, stretch, scaling) and the settings (clock, rec, pause, power, island, update). Drawn rather
+            /// bright, area, stretch, scaling) and the settings (clock, rec, pause, power, island, update, log). Drawn rather
             /// than taken from the icon font, which has no symbol for most of them.
             /// </summary>
             void LineIcon(Graphics g, string key, Rectangle box, Color c)
@@ -1515,6 +1537,13 @@ namespace HdrSwitch
                             line(8, 2, 8, 10);
                             g.DrawLines(pen, new[] { P_(4.5f, 6.5f), P_(8, 10), P_(11.5f, 6.5f) });
                             line(2.5f, 13.5f, 13.5f, 13.5f);
+                            break;
+                        case "folder":
+                            g.DrawLines(pen, new[] { P_(1.5f, 12.5f), P_(1.5f, 3.5f), P_(6, 3.5f), P_(7.5f, 5.5f), P_(14.5f, 5.5f), P_(14.5f, 12.5f), P_(1.5f, 12.5f) });
+                            break;
+                        case "log":      // a page of lines
+                            box_(R(2.5f, 1.5f, 11, 13), 1);
+                            line(5, 5, 11, 5); line(5, 8, 11, 8); line(5, 11, 9, 11);
                             break;
                         case "chev":     // a row that opens a page or a list
                             g.DrawLines(pen, new[] { P_(6, 3.5f), P_(10.5f, 8), P_(6, 12.5f) });
@@ -1949,13 +1978,14 @@ namespace HdrSwitch
         /// HdrSwitch.exe --render-flyout out.png [--theme dark|light|hc] [--tab live|games|settings]
         /// [--state running|stretch|grace|recording|paused|idle] [--view games|add|game|res|stretch] [--game exe]
         /// [--search text] [--expand brightness|area] [--notice text] [--no-nvidia] [--scale 1.5] [--focus key]
-        /// [--hover key] [--win10] [--no-update]: draws the flyout over made-up state into a PNG and exits, so its look
+        /// [--hover key] [--win10] [--no-update] [--creator no-cru|ready|exists|confirm|busy|done|failed]: draws the
+        /// flyout over made-up state into a PNG and exits, so its look
         /// can be checked without Windows (under Mono, say). Never part of a normal run. The states: running –
         /// Counter-Strike 2 with HDR, SDR brightness 40, a competitive area and No scaling; stretch – VALORANT
         /// stretched over its area; grace – it closed, back to SDR in 2 s; recording – OBS keeps HDR off; paused; idle.
         /// The library has ten games: with HDR or never, brightness, areas, a stretch, and one area the display lacks.
         /// --view game shows --game's page (cs2 unless given); --expand brightness opens its slider (the area is open
-        /// whenever it is set).
+        /// whenever it is set). --view creator shows the resolution creator for --game, in the state --creator names.
         /// </summary>
         internal static int RenderFlyout(string[] args)
         {
@@ -1980,6 +2010,9 @@ namespace HdrSwitch
                 sample.Modes.Add(new Resolution.Mode { Width = m[0], Height = m[1], Hz = 240 });
             var app = new TrayApp(sample);
             sample.Nvidia = !args.Contains("--no-nvidia");
+            sample.Creator = arg("--creator", "ready");
+            app.cruFolder = sample.Creator == "no-cru" ? null : @"C:\Tools\CRU";
+            if (sample.Creator != "no-cru") sample.Backups.Add("LG 27GR95QE");
             foreach (var g in new[] { "cs2", "cyberpunk2077", "eldenring", "valorant", "r5apex", "bg3", "forzahorizon5", "helldivers2" }) app.games.Add(g);
             foreach (var g in new[] { "hades2", "stardewvalley" }) app.excluded.Add(g);
             app.labels["cs2"] = "Steam: Counter-Strike 2";
