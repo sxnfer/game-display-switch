@@ -274,18 +274,27 @@ namespace HdrSwitch
         /// <summary>The latest notice about this game's resolution, for its page. Null: none.</summary>
         internal string ProblemOf(string game) { return notices.Latest(game); }
 
-        /// <summary>A game's process appeared, or Steam is starting it: a new start gets every notice again.</summary>
-        void NoteLaunch(string name, bool fromSteam)
+        /// <summary>
+        /// A game's process appeared, or Steam is starting it: a new start gets every notice again. True if this process is
+        /// the one Steam's Play already switched for.
+        /// </summary>
+        bool NoteLaunch(string name, bool fromSteam)
         {
             long now = keepClock.ElapsedMilliseconds;
             bool steamStartedIt = !fromSteam && prelaunched != null && string.Equals(prelaunched, name, StringComparison.OrdinalIgnoreCase) && now - prelaunchedAt < 90000;
             int others = running.Values.Count(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)) - (fromSteam ? 0 : 1);   // Track has added this one already
             bool fresh = Notices.NewLaunch(steamStartedIt, others);
-            if (fresh) notices.Launch(name);
+            if (fresh)
+            {
+                notices.Launch(name);
+                tries.ClearPrefix("on|" + name + "|");   // HDR on its screen and following it there get their tries again (Follow.cs)
+                moves.Clear(name);
+            }
             SwitchLog.Write("launch", "game", name, "from", fromSteam ? "steam" : "process", "steamStartedIt", steamStartedIt, "othersRunning", others, SwitchLog.Then,
                 fresh ? "a new start: its notices are shown again if they come up" : "not a new start: notices already shown stay quiet");
             if (fromSteam) { prelaunched = name; prelaunchedAt = now; }
             else if (steamStartedIt) prelaunched = null;
+            return steamStartedIt;
         }
 
         /// <summary>After TakeScaling: say so if No scaling isn't set (and there is an NVIDIA driver to set it).</summary>

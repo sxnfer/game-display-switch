@@ -382,7 +382,7 @@ namespace HdrSwitch
                 }
                 try
                 {
-                    s.Gdi = TargetGdi();
+                    s.Gdi = PageGdi();   // the game's own screen: that monitor's EDID is read and added to
                     s.Display = Resolution.MonitorPath(s.Gdi);
                     var cur = Resolution.Current(s.Gdi);
                     s.CurrentHz = cur != null ? cur.Hz : 0;
