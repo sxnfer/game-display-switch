@@ -63,6 +63,11 @@ namespace HdrSwitch
                 Environment.ExitCode = Island.RenderSample(args);
                 return;
             }
+            if (args.Contains(Creator.ApplyFlag) || args.Contains(Creator.UndoFlag))   // the resolution creator's elevated copy (Creator.cs): one registry job, then it exits
+            {
+                Environment.ExitCode = Creator.Elevated(args);
+                return;
+            }
             if (args.Contains("--island-demo"))   // a preview of the island alone: before the mutex, so it runs beside an installed copy
             {
                 Application.EnableVisualStyles();
@@ -1777,7 +1782,8 @@ namespace HdrSwitch
             "# Display Switch - competitive resolutions. While one of these games runs, the screen switches to this",
             "# resolution, shown 1:1 in the middle with black borders, and goes back when the game closes.",
             "# One game per line: exe, resolution, optional @refresh rate (otherwise the current one). Text after # is a note.",
-            "# The resolution must be in Windows' list: create it in NVIDIA Control Panel > Change resolution > Customize.",
+            "# The resolution must be in Windows' list: create it on the game's page (Competitive area > Create...) or in",
+            "# NVIDIA Control Panel > Change resolution > Customize.",
             "# For a game in borderless (fullscreen windowed) mode, add  stretch 1776x1332  after the resolution: the game",
             "# then runs at that lower resolution, stretched over the competitive one. It has to fit inside it.",
             "# Easier: the tray icon, Games, then the game: its page sets both. Changes apply as soon as you save.",

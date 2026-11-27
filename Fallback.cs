@@ -98,13 +98,13 @@ namespace HdrSwitch
                         Why = "no-stretch (no " + Size(stretch) + " at " + wantedHz + " Hz" + Has(stretchRates) + ", no " + Size(area) + " at " + wantedHz + " Hz" + Has(areaRates)
                             + ": the plain area at " + aLow + " Hz, the highest it has up to the desktop's " + desktopHz + " Hz)" };
                 return new Plan { Kind = Kind.Nothing, Reason = "missing",
-                    Message = "No " + stretch.Text + " or " + area.Text + " at " + wantedHz + " Hz for " + game + ". Create it as a custom resolution in NVIDIA Control Panel.",
+                    Message = "No " + stretch.Text + " or " + area.Text + " at " + wantedHz + " Hz for " + game + ". Create it on the game's page (Competitive area › Create…) or in NVIDIA Control Panel.",
                     Why = "nothing (no " + Size(stretch) + " at " + wantedHz + " Hz" + Has(stretchRates) + ", no " + Size(area) + " at " + wantedHz + " Hz" + Has(areaRates) + NoLower(explicitHz, desktopHz) + ")" };
             }
             int hz = aNear > 0 || explicitHz ? aNear : Lower(desktopHz, areaRates);
             if (hz == 0)
                 return new Plan { Kind = Kind.Nothing, Reason = "missing",
-                    Message = "No " + area.Text + " at " + wantedHz + " Hz for " + game + ". Create it as a custom resolution in NVIDIA Control Panel.",
+                    Message = "No " + area.Text + " at " + wantedHz + " Hz for " + game + ". Create it on the game's page (Competitive area › Create…) or in NVIDIA Control Panel.",
                     Why = "nothing (no " + Size(area) + " at " + wantedHz + " Hz" + Has(areaRates) + NoLower(explicitHz, desktopHz) + ")" };
             var plan = new Plan { Kind = KindOf(hz, wantedHz), Mode = At(area, hz), Why = RateWhy(Size(area), hz, wantedHz) };
             if (plan.Kind == Kind.OtherRate)

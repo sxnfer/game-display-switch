@@ -344,6 +344,20 @@ namespace HdrSwitch
             return null;
         }
 
+        /// <summary>
+        /// The device path of the monitor on this display (\\?\DISPLAY#DELA252#5&amp;312b7513&amp;0&amp;UID4355#{guid}), which names its
+        /// key under Enum\DISPLAY in the registry. "" if Windows doesn't give one.
+        /// </summary>
+        public static string MonitorPath(string gdi)
+        {
+            try
+            {
+                var mon = new DisplayDevice { Size = Marshal.SizeOf(typeof(DisplayDevice)) };
+                return EnumDisplayDevicesW(gdi, 0, ref mon, EDD_GET_DEVICE_INTERFACE_NAME) ? mon.DeviceId ?? "" : "";
+            }
+            catch { return ""; }
+        }
+
         /// <summary>The panel's diagonal in inches from the monitor's EDID, or 0 if it doesn't say.</summary>
         public static double Inches(string gdi)
         {
