@@ -276,8 +276,9 @@ namespace HdrSwitch
             catch (Exception) { return SwitchLog.Pairs("state", "?"); }
         }
 
-        // Sleep, resume, lock and unlock change nothing here: they are only written down, because a display mode lost
-        // around one of them is otherwise a mystery.
+        // Sleep, resume, lock and unlock are written down, because a display mode lost around one of them is otherwise a
+        // mystery – and after waking up or unlocking, a competitive mode that was reset is set again (OnPower and
+        // OnSession in ModeKeeper.cs, which write the line).
         Microsoft.Win32.PowerModeChangedEventHandler onPowerLog;
         Microsoft.Win32.SessionSwitchEventHandler onSessionLog;
 
@@ -287,8 +288,8 @@ namespace HdrSwitch
             {
                 if (on)
                 {
-                    onPowerLog = (s, e) => { string m = e.Mode.ToString(); ui.Post(_ => SwitchLog.Write("power", "event", m, ChangeState()), null); };
-                    onSessionLog = (s, e) => { string r = e.Reason.ToString(); ui.Post(_ => SwitchLog.Write("session", "event", r, ChangeState()), null); };
+                    onPowerLog = (s, e) => { var m = e.Mode; ui.Post(_ => OnPower(m), null); };
+                    onSessionLog = (s, e) => { var r = e.Reason; ui.Post(_ => OnSession(r), null); };
                     Microsoft.Win32.SystemEvents.PowerModeChanged += onPowerLog;
                     Microsoft.Win32.SystemEvents.SessionSwitch += onSessionLog;
                 }

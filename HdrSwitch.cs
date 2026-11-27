@@ -117,6 +117,12 @@ namespace HdrSwitch
             public Resolution.Mode Area;         // the competitive area Mode is stretched over – or null: Mode is the area itself, shown 1:1
             public string Game;
             public int ScalingBack = -1;         // the NVIDIA scaling setting to put back, or -1 if this app didn't change it
+            // Keeping it while the game runs (ModeKeeper.cs):
+            public bool Centred;                 // a 1:1 mode was shown centred right after it was set: losing that is a reset
+            public readonly List<long> Reapplied = new List<long>();   // when it was set again after a reset, for the budget
+            public bool GaveUp;                  // the budget ran out, and the desktop hasn't been in this mode since
+            public ModeKeeper.Verdict Last;      // the last decision about it, and the mode the desktop was in then
+            public Resolution.Mode LastCurrent;
             /// <summary>"2368 × 1332", or "1776 × 1332 stretched to 2368 × 1332".</summary>
             public string Text { get { return Area == null ? Mode.Text : Mode.Text + " stretched to " + Area.Text; } }
         }
@@ -206,10 +212,10 @@ namespace HdrSwitch
 
             sdrTimer.Interval = sdrDelay * 1000;
             sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); SwitchLog.Write("grace-fire", "afterSeconds", sdrDelay); Settle(); };
-            scanTimer.Tick += (s, e) => { Rescan(); FollowGameScreens(); island.Poll(); if (updateExe != null) FinishUpdate(); };
+            scanTimer.Tick += (s, e) => { Rescan(); FollowGameScreens(); ScanMode(); island.Poll(); if (updateExe != null) FinishUpdate(); };
             steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); SwitchLog.Write("steam-timeout", "running", running.Count, SwitchLog.Then, "no game appeared within 60 s of Play: settling"); Settle(); };
             reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); LoadRecorders(); LoadBrightness(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
-            modeCheck.Tick += (s, e) => { modeCheck.Stop(); OnDisplayChanged(false); };
+            modeCheck.Tick += (s, e) => { modeCheck.Stop(); OnDisplayChanged(false); };   // also Resume, unlock, after HDR, a retry: see CheckSoon
             LogSystemEvents(true);
             SwitchLog.Write("start", "version", Updater.CurrentText, "games", games.Count, "profiles", profiles.Count, "target", TargetGdi(), "why", TargetWhy(),
                 ModesOf(TargetGdi()), "hdr", HdrText());
@@ -223,7 +229,7 @@ namespace HdrSwitch
 
             steam = new SteamWatcher(id => ui.Post(_ => OnSteamStarted(id), null));
             hotkey = new HotKey(() => SetPaused(!paused));
-            onDisplayChanged = (s, e) => ui.Post(_ => OnDisplayChanged(true), null);
+            onDisplayChanged = (s, e) => ui.Post(_ => { lastChange = keepClock.ElapsedMilliseconds; OnDisplayChanged(true); }, null);
             SystemEvents.DisplaySettingsChanged += onDisplayChanged;
 
             RecoverResolution();   // a previous run was killed while a game had its resolution
@@ -437,6 +443,7 @@ namespace HdrSwitch
             if (mode && Proc.AgeSeconds(pid) > 5 && resHinted.Add(name))
                 Hint(ResHint(name));
             if (hdr || mode) AnnounceGame(name, hdr);
+            if (hdr && res != null) CheckSoon(ModeKeeper.How.HdrVerify, 1500);   // some drivers reset the mode a moment after an HDR switch
             SwitchLog.Write("tracked", "pid", pid, "exe", name, "hdrSwitched", hdr, "modeSwitched", mode, "ours", OursText(res), "hdr", HdrText());
             StartGrace();   // e.g. HDR was about to go off when a game that only has a resolution started
             UpdateTray();
@@ -521,6 +528,7 @@ namespace HdrSwitch
             bool hdr = games.Contains(name) && SwitchOn(name);              // HDR first – see Track
             bool mode = profiles.ContainsKey(name) && ApplyResolution(name);
             if (hdr || mode) AnnounceGame(name, hdr);
+            if (hdr && res != null) CheckSoon(ModeKeeper.How.HdrVerify, 1500);
             steamTimeout.Stop();
             steamTimeout.Start();   // back to normal if the game doesn't show up within a minute
             SwitchLog.Write("steam-prelaunch", "exe", name, "hdrSwitched", hdr, "modeSwitched", mode, "ours", OursText(res), SwitchLog.Then, "waiting up to 60 s for the game's process");
@@ -966,9 +974,11 @@ namespace HdrSwitch
         bool StretchLost() { return res != null && res.Area != null && !InOurMode() && !Resolution.AtSaved(res.Gdi); }
 
         /// <summary>
-        /// Switching HDR on or off makes Windows reapply the display mode saved in settings, at once – before the call
-        /// returns – which drops the competitive mode. Called right after our own HDR switch, and only if the desktop was
-        /// in our mode just before it, so a mode the user picked by hand is never overridden.
+        /// Switching HDR on or off makes Windows reapply the display mode saved in settings – usually at once, before the
+        /// call returns, with some drivers a moment later – which drops the competitive mode. Called right after our own
+        /// HDR switch, and only if the desktop was in our mode just before it, so a mode the user picked by hand is never
+        /// overridden. Decided and logged like every other lost mode (CheckMode): Windows refusing the mode gets another
+        /// try, and the mode is looked at once more 1.5 s later.
         /// </summary>
         void KeepMode()
         {
@@ -977,15 +987,9 @@ namespace HdrSwitch
                 SwitchLog.Write("keep-mode", SwitchLog.Then, "nothing to keep (no mode of ours)");
                 return;
             }
-            if (InOurMode())
-            {
-                SwitchLog.Write("keep-mode", "ours", OursText(res), SwitchLog.Then, "still in our mode");
-                return;
-            }
-            var was = Resolution.Current(res.Gdi);
-            bool ok = SetMode(res);
-            SwitchLog.Write("keep-mode", "display", res.Gdi, "ours", OursText(res), "was", was, "how", SetModeTrace(res), "now", Resolution.Current(res.Gdi), "picture", Resolution.Read(res.Gdi),
-                SwitchLog.Then, ok ? "re-applied (our own HDR switch had reset the mode)" : "re-apply failed");
+            var v = CheckMode(ModeKeeper.How.OwnSwitch);
+            SwitchLog.Write("keep-mode", "ours", OursText(res), "decided", v, SwitchLog.Then, res == null ? "let go of" : "looked at again in 1.5 s");
+            if (res != null) CheckSoon(ModeKeeper.How.HdrVerify, 1500);
         }
 
         /// <summary>Switches the desktop to a competitive mode: shown 1:1 in the middle, or stretched over its area.</summary>
@@ -1051,14 +1055,33 @@ namespace HdrSwitch
                 SwitchLog.Write("apply", "game", name, SwitchLog.Then, "skipped (no competitive resolution for this game)");
                 return false;
             }
+            if (res != null && res.Game.Length == 0 && !Matches(res, p, StretchOf(name)))
+            {
+                // Taken over from a previous run (see RecoverResolution), but it isn't what this game asks for now: back to
+                // the saved mode, then this game's own, as if nothing had been left.
+                SwitchLog.Write("apply", "game", name, "want", p, "display", res.Gdi, ModesOf(res.Gdi), "ours", OursText(res), SwitchLog.Then,
+                    "the mode a previous run left isn't this game's profile: putting it back, then applying this game's");
+                RevertResolution();
+            }
             if (res != null)
             {
                 bool adopted = res.Game.Length == 0;
-                if (res.Game.Length == 0) res.Game = name;   // taken over from a previous run (see RecoverResolution)
-                SwitchLog.Write("apply", "game", name, "want", p, "display", res.Gdi, ModesOf(res.Gdi), "ours", OursText(res), "inOurMode", InOurMode(), "matchesProfile", MatchesText(name),
-                    SwitchLog.Then, adopted ? "skipped (the mode a previous run left is taken over for this game; not checked or set again)"
-                        : "skipped (held by " + res.Game + ": the first profiled game's mode stays; not checked or set again)");
-                return false;
+                if (adopted)
+                {
+                    res.Game = name;
+                    res.Centred = res.Area == null && Centred(Resolution.Read(res.Gdi));
+                }
+                bool other = res.Game != name;
+                bool lost = !InOurMode();
+                SwitchLog.Write("apply", "game", name, "want", p, "display", res.Gdi, ModesOf(res.Gdi), "ours", OursText(res), "inOurMode", !lost, "matchesProfile", MatchesText(name),
+                    SwitchLog.Then, (adopted ? "the mode a previous run left is this game's: taken over for it"
+                        : other ? "held by " + res.Game + ": the first game's mode keeps priority while both run, this game's profile is not applied"
+                        : "already held for this game") + (lost ? "; the desktop is NOT in that mode: checking why" : "; the desktop is in it: nothing to set"));
+                if (!lost) return false;
+                // Lost meanwhile (a reset during the grace period or the Steam start, or under the game that holds it):
+                // set again for the game that holds it, unless it was changed on purpose.
+                var holder = res;
+                return CheckMode(ModeKeeper.How.GameStart) == ModeKeeper.Verdict.Reapply && res == holder && InOurMode();
             }
             string gdi = TargetGdi();
             var now = Resolution.Current(gdi);
@@ -1079,9 +1102,29 @@ namespace HdrSwitch
             // What every "apply" line starts with: the game, the display and why it was picked, what is wanted, what is there.
             var asked = SwitchLog.Pairs("game", name, "display", gdi, "why", TargetWhy(), "want", mode, "area", stretch ? area : null, "profileHz", p.Hz > 0 ? p.Hz + "" : "current",
                 "current", now, "saved", Resolution.Saved(gdi));
-            if (mode.Same(now) && (!stretch || Resolution.Stretched(gdi, area.Width, area.Height)))   // already in that mode (set by hand): not ours to switch back
+            if (leftover != null && (leftover.Gdi != gdi || !leftover.Mode.Same(now)))   // gone since: nothing of ours is left
             {
-                SwitchLog.Write("apply", asked, SwitchLog.Then, "skipped (the desktop is already in this mode, set elsewhere: not tracked, NVIDIA scaling not touched, nothing to put back)");
+                leftover = null;
+                if (strayScaling < 0) DeleteState();
+            }
+            if (mode.Same(now) && (!stretch || Resolution.Stretched(gdi, area.Width, area.Height)))
+            {
+                if (leftover == null)   // already in that mode, set by hand: not ours to switch back
+                {
+                    SwitchLog.Write("apply", asked, SwitchLog.Then, "skipped (the desktop is already in this mode, set elsewhere: not tracked, NVIDIA scaling not touched, nothing to put back)");
+                    return false;
+                }
+                // Already in that mode because this app left it there (Windows refused to put it back): it is ours, so it
+                // is tracked and put back like one set just now, and the scaling is taken as usual.
+                if (stretch) SwitchLog.Write("scaling-take", "display", gdi, SwitchLog.Then, "not taken (a stretched resolution: NVIDIA's scaling setting is left as it is)");
+                var kept = new ActiveMode { Gdi = gdi, Id = DisplayIdOf(gdi), Mode = mode, Area = stretch ? area : null, Back = leftover.Back ?? Resolution.Saved(gdi), Game = name,
+                    ScalingBack = stretch ? -1 : TakeScaling(gdi) };
+                kept.Centred = !stretch && Centred(Resolution.Read(gdi));
+                leftover = null;
+                res = kept;
+                SaveState();
+                SwitchLog.Write("apply", asked, "back", kept.Back, "scalingBack", kept.ScalingBack, "picture", Resolution.Read(gdi), SwitchLog.Then,
+                    "taken over (the desktop is already in this mode, left there by this app when it couldn't be put back: tracked again, put back when the game closes)");
                 return false;
             }
             if (!Resolution.Available(gdi, mode.Width, mode.Height, mode.Hz))
@@ -1109,9 +1152,11 @@ namespace HdrSwitch
                 return false;
             }
             res = active;
+            leftover = null;
             SwitchLog.Write("apply", asked, "back", active.Back, "scalingBack", scalingBack, "how", SetModeTrace(active), SwitchLog.Then, stretch ? "applied (stretched over the area)" : "applied (1:1, centred)");
             SaveState();
             if (KeepHdr()) KeepMode();   // putting HDR back would itself reset the mode
+            if (res != active) return false;   // let go of meanwhile (see CheckMode)
             if (stretch)
             {
                 bool held = Resolution.Stretched(gdi, area.Width, area.Height);
@@ -1122,6 +1167,7 @@ namespace HdrSwitch
 
             // The panel should still get its native signal, with the smaller desktop centred in it.
             var after = Resolution.Read(gdi);
+            active.Centred = Centred(after);   // only a mode that was centred can lose that later (see ModeKeeper.cs)
             SwitchLog.Write("picture", "game", name, "display", gdi, "before", before, "after", after, "now", Resolution.Current(gdi), "nvidia", SwitchLog.NvidiaName(Nvidia.Scaling(gdi)), SwitchLog.Then,
                 before == null || after == null ? "the display path couldn't be read: not checked"
                 : after.TargetW != before.TargetW || after.TargetH != before.TargetH ? "the signal to the panel changed size: the monitor is scaling" + (resWarned ? " (warned earlier this session: no notification)" : "")
@@ -1154,6 +1200,7 @@ namespace HdrSwitch
             var r = res;
             res = null;
             DeleteState();
+            bool left = false;
             var current = Resolution.Current(r.Gdi);
             if (r.Mode.Same(current))   // otherwise changed meanwhile (settings, sleep, …): not ours any more
             {
@@ -1171,11 +1218,32 @@ namespace HdrSwitch
                         SwitchLog.Then, ok ? "put back to the saved mode" : "FAILED to put back the saved mode");
                 }
                 KeepHdr();
+                left = StillLeft(r);
             }
             else SwitchLog.Write("revert", "display", r.Gdi, "ours", OursText(r), "current", current, "saved", Resolution.Saved(r.Gdi), SwitchLog.Then,
                 "mode left alone (the desktop is no longer in our mode: changed elsewhere, not ours to put back)");
             RestoreScaling(r.Gdi, r.ScalingBack);   // the scaling setting is separate from the mode: put it back either way
+            if (!left) return;
+            // Windows refused and the desktop is still in our temporary mode. It stays ours: remembered here and in
+            // resolution.state, so the next game that wants it – or the next start of the app – takes it over and puts it
+            // back, instead of finding a mode "set elsewhere".
+            leftover = r;
+            bool strayHere = strayScaling >= 0 && (strayDisplay == null || GdiOf(strayDisplay) == r.Gdi);
+            r.ScalingBack = strayHere ? strayScaling : -1;   // not put back at a temporary mode: RestoreScaling keeps it for later
+            if (strayHere || strayScaling < 0) WriteState(FormatModeState(StateOf(r)));   // another display's scaling record stays as it is
+            SwitchLog.Write("revert", "display", r.Gdi, "ours", OursText(r), "now", Resolution.Current(r.Gdi), SwitchLog.Then,
+                "the desktop is still in our mode: remembered as ours (the next game that wants it, or the next start, takes it over)");
         }
+
+        /// <summary>After a revert: the desktop is still in the temporary mode this app set (and it isn't the saved one).</summary>
+        static bool StillLeft(ActiveMode r)
+        {
+            var now = Resolution.Current(r.Gdi);
+            return r.Mode.Same(now) && !Resolution.AtSaved(r.Gdi);
+        }
+
+        /// <summary>The display path shows the desktop centred (or 1:1 on a signal of its own size).</summary>
+        static bool Centred(Resolution.Picture p) { return p != null && p.Centered; }
 
         int strayScaling = -1;   // a scaling setting still to put back: left by a killed previous run, or deferred (see RestoreScaling)
         string strayDisplay;     // the display it belongs to (its Id, or a GDI name from an older resolution.state)
@@ -1287,27 +1355,34 @@ namespace HdrSwitch
             RestoreScaling(gdi, back);
             if (strayScaling >= 0) return;   // deferred again
             strayDisplay = null;
-            if (res == null) DeleteState();
+            if (res == null && leftover != null)
+            {
+                leftover.ScalingBack = -1;
+                WriteState(FormatModeState(StateOf(leftover)));   // the mode left behind is still to put back
+            }
+            else if (res == null) DeleteState();
         }
 
         /// <summary>
-        /// Windows says the display settings changed. While a game with a resolution runs, ownership is kept: a game in
-        /// exclusive fullscreen sets its own mode, and Windows brings ours back on every Alt+Tab and when the game exits –
-        /// RevertResolution then decides, by looking at the mode at that moment. With no such game running (the grace
-        /// period, a Steam start that never came) a mode that isn't ours any more isn't ours to put back. Checked again
-        /// 2 s later first, in case the change was a transient one.
+        /// Windows says the display settings changed. While a game with a resolution runs, the mode is kept: a second
+        /// after the last change of a burst, CheckMode says whether the desktop is still in our mode and, if not, whether
+        /// Windows reset it (set again), the game set its own (left alone) or the display settings were changed on purpose
+        /// (let go of) – see ModeKeeper.cs. With no such game running (the grace period, a Steam start that never came) a
+        /// mode that isn't ours any more isn't ours to put back; that is checked again 2 s later first, in case the change
+        /// was a transient one. Also what the pending check runs when it was started for another reason (CheckSoon).
         /// </summary>
         void OnDisplayChanged(bool first)
         {
-            // The log: the state as it is found, on every change Windows reports and on the check 2 s after one.
-            string logAs = first ? "display-changed" : "display-recheck";
-            var found = ChangeState();
+            // The log: the state as it is found, on every change Windows reports and on the check after one.
+            var how = first ? ModeKeeper.How.DisplayChange : TakeCheck();
+            string logAs = first ? "display-changed" : how == ModeKeeper.How.DisplayChange ? "display-recheck" : "mode-recheck";
+            var found = how == ModeKeeper.How.DisplayChange ? ChangeState() : SwitchLog.Pairs("how", how, ChangeState());
             if (res != null && !ProfiledRunning() && !res.Mode.Same(Resolution.Current(res.Gdi)))
             {
                 if (first)
                 {
                     SwitchLog.Write(logAs, found, SwitchLog.Then, "our mode is gone and no profiled game runs: checking again in 2 s before giving it up");
-                    modeCheck.Stop(); modeCheck.Start(); return;
+                    CheckSoon(ModeKeeper.How.DisplayChange, 2000); return;
                 }
                 SwitchLog.Write(logAs, found, SwitchLog.Then, "our mode is gone and no profiled game runs: no longer ours, nothing is put back but the NVIDIA scaling");
                 var r = res;
@@ -1315,25 +1390,24 @@ namespace HdrSwitch
                 DeleteState();
                 RestoreScaling(r.Gdi, r.ScalingBack);   // the mode isn't ours any more, but the scaling setting still is
             }
-            else if (ProfiledRunning() && StretchLost())
+            else if (res != null && ProfiledRunning())
             {
-                // A stretched mode only lasts while nothing else sets a mode. A game in exclusive fullscreen does, and puts
-                // its own back after every change from outside, so forcing ours would only start a fight over the display.
-                // Left alone, like any mode set elsewhere – but said once, because the fix is in the game's settings.
                 if (first)
                 {
-                    SwitchLog.Write(logAs, found, SwitchLog.Then, "the stretched mode was replaced while its game runs: checking again in 2 s");
-                    modeCheck.Stop(); modeCheck.Start(); return;
+                    // Not judged in the middle of a burst: a game going into exclusive fullscreen, HDR switching or a
+                    // monitor waking up reports several changes, and the desktop passes through the saved mode on the way.
+                    SwitchLog.Write(logAs, found, SwitchLog.Then, "a profiled game runs: deciding about our mode 1 s after the last change");
+                    CheckSoon(ModeKeeper.How.DisplayChange, 1000);
                 }
-                SwitchLog.Write(logAs, found, SwitchLog.Then, "the stretched mode was replaced while its game runs (the game set its own): left alone, not re-applied"
-                    + (resFailed.Contains(res.Game + "/own") ? "; the notification about it was already shown once" : "; notification shown"));
-                if (resFailed.Add(res.Game + "/own"))
-                    Hint(DisplayName(res.Game) + " set its own display mode, so " + res.Mode.Text + " is no longer stretched. Switch the game to borderless and restart it.");
+                else
+                {
+                    SwitchLog.Write(logAs, found, SwitchLog.Then, "a profiled game runs: deciding about our mode now");
+                    CheckMode(how);
+                }
             }
             else SwitchLog.Write(logAs, found, SwitchLog.Then,
                 res == null ? "no mode of ours: nothing to do"
                 : InOurMode() ? "still in our mode: nothing to do"
-                : ProfiledRunning() ? "NOT in our mode while a profiled game runs: left alone, not re-applied (ownership kept; the mode at the game's exit decides what is put back)"
                 : "our mode's size and rate are still set, without its stretch, and no profiled game runs: nothing to do until the grace period ends");
             if (!ProfiledRunning()) RestoreStrayScaling();   // a deferred restore: maybe the desktop is back at its saved mode now
             island.Relayout();   // the top-centre may have moved
@@ -1358,8 +1432,15 @@ namespace HdrSwitch
 
         void SaveState()
         {
-            WriteState(FormatModeState(new ModeState { Gdi = res.Gdi, Id = res.Id, Width = res.Mode.Width, Height = res.Mode.Height, Hz = res.Mode.Hz,
-                ScalingBack = res.ScalingBack, AreaWidth = res.Area == null ? 0 : res.Area.Width, AreaHeight = res.Area == null ? 0 : res.Area.Height }));
+            WriteState(FormatModeState(StateOf(res)));
+        }
+
+        /// <summary>A mode of ours as it is written to resolution.state, with the mode it goes back to.</summary>
+        static ModeState StateOf(ActiveMode a)
+        {
+            return new ModeState { Gdi = a.Gdi, Id = a.Id, Width = a.Mode.Width, Height = a.Mode.Height, Hz = a.Mode.Hz,
+                ScalingBack = a.ScalingBack, AreaWidth = a.Area == null ? 0 : a.Area.Width, AreaHeight = a.Area == null ? 0 : a.Area.Height,
+                BackWidth = a.Back == null ? 0 : a.Back.Width, BackHeight = a.Back == null ? 0 : a.Back.Height, BackHz = a.Back == null ? 0 : a.Back.Hz };
         }
 
         /// <summary>
@@ -1373,6 +1454,13 @@ namespace HdrSwitch
             public int Width, Height, Hz;
             public int ScalingBack = -1;  // the NVIDIA scaling setting to put back, or -1
             public int AreaWidth, AreaHeight;   // the area a stretched mode fills, or 0
+            public int BackWidth, BackHeight, BackHz;   // the saved mode when it was set – what it goes back to – or 0: not recorded
+
+            /// <summary>The recorded mode to go back to, or null.</summary>
+            public Resolution.Mode Back()
+            {
+                return BackWidth > 0 && BackHeight > 0 && BackHz > 0 ? new Resolution.Mode { Width = BackWidth, Height = BackHeight, Hz = BackHz } : null;
+            }
 
             public static ModeState ScalingOnly(string gdi, int back, string id)
             {
@@ -1381,13 +1469,14 @@ namespace HdrSwitch
         }
 
         /// <summary>
-        /// "\\.\DISPLAY1|2368|1332|240|7|0|0|\\?\DISPLAY#…": GDI name, mode, scaling to put back, stretched area, display Id. Older
-        /// versions read the first seven fields the same way and ignore the Id.
+        /// "\\.\DISPLAY1|2368|1332|240|7|0|0|\\?\DISPLAY#…|2560|1440|240": GDI name, mode, scaling to put back, stretched area,
+        /// display Id, the mode to go back to (left out if it isn't known). Older versions read the first seven fields the
+        /// same way and ignore the rest.
         /// </summary>
         internal static string FormatModeState(ModeState m)
         {
             return m.Gdi + "|" + m.Width + "|" + m.Height + "|" + m.Hz + "|" + m.ScalingBack + "|" + m.AreaWidth + "|" + m.AreaHeight
-                + (string.IsNullOrEmpty(m.Id) ? "" : "|" + m.Id);
+                + (m.Back() != null ? "|" + m.Id + "|" + m.BackWidth + "|" + m.BackHeight + "|" + m.BackHz : string.IsNullOrEmpty(m.Id) ? "" : "|" + m.Id);
         }
 
         /// <summary>
@@ -1404,8 +1493,11 @@ namespace HdrSwitch
                 || (f.Length > 6 && (!int.TryParse(f[5], out areaW) || !int.TryParse(f[6], out areaH)))) return null;
             if (w < 0 || h < 0 || hz < 0 || areaW < 0 || areaH < 0) return null;
             string id = f.Length > 7 ? f[7].Trim() : "";
+            int backW = 0, backH = 0, backHz = 0;
+            if (f.Length > 10 && !(int.TryParse(f[8], out backW) && int.TryParse(f[9], out backH) && int.TryParse(f[10], out backHz) && backW > 0 && backH > 0 && backHz > 0))
+                backW = backH = backHz = 0;   // a broken mode to go back to: as if none was recorded
             return new ModeState { Gdi = f[0].Trim(), Id = id.Length > 0 ? id : null, Width = w, Height = h, Hz = hz,
-                ScalingBack = back < 0 ? -1 : back, AreaWidth = areaW, AreaHeight = areaH };
+                ScalingBack = back < 0 ? -1 : back, AreaWidth = areaW, AreaHeight = areaH, BackWidth = backW, BackHeight = backH, BackHz = backHz };
         }
 
         /// <summary>The active mode is what this profile – and its stretched resolution, if it has one – asks for.</summary>
@@ -1475,9 +1567,15 @@ namespace HdrSwitch
                 else DeleteState();
                 return;
             }
-            res = new ActiveMode { Gdi = m.Gdi, Id = m.Id ?? DisplayIdOf(m.Gdi), Mode = mode, Back = Resolution.Saved(m.Gdi), Game = "", ScalingBack = m.ScalingBack,
+            // What it goes back to is the saved mode – unless our own temporary mode is what got saved before the crash:
+            // then the mode recorded in the file, or the panel's native one (ModeKeeper.RecoveredBack).
+            string backWhy;
+            var saved = Resolution.Saved(m.Gdi);
+            var goBack = ModeKeeper.RecoveredBack(mode, saved, m.Back(), Resolution.Read(m.Gdi), out backWhy);
+            res = new ActiveMode { Gdi = m.Gdi, Id = m.Id ?? DisplayIdOf(m.Gdi), Mode = mode, Back = goBack, Game = "", ScalingBack = m.ScalingBack,
                 Area = m.AreaWidth > 0 && m.AreaHeight > 0 ? new Resolution.Mode { Width = m.AreaWidth, Height = m.AreaHeight, Hz = m.Hz } : null };
-            SwitchLog.Write("recover-mode", "display", m.Gdi, "ours", OursText(res), "saved", res.Back, "inOurMode", InOurMode(), SwitchLog.Then,
+            res.Centred = res.Area == null && Centred(Resolution.Read(m.Gdi));
+            SwitchLog.Write("recover-mode", "display", m.Gdi, "ours", OursText(res), "saved", saved, "recorded", m.Back(), "back", goBack, "backFrom", backWhy, "inOurMode", InOurMode(), SwitchLog.Then,
                 "the desktop is still in the mode a previous run set: taken over (a running profiled game adopts it, otherwise it is put back)");
         }
 
@@ -2068,7 +2166,9 @@ namespace HdrSwitch
                 : hdrGames.Count > 0 ? "HDR on – " + string.Join(", ", hdrGames)
                 : displays.Any(d => d.On) ? "HDR is on" : "Waiting for a game";
             if (res == null) return hdr;
-            string mode = (StretchLost() ? res.Mode.Text + " not stretched" : res.Text) + " – " + DisplayName(res.Game);
+            string mode = (StretchLost() ? res.Mode.Text + " not stretched"
+                : res.Last == ModeKeeper.Verdict.GameOwnMode ? res.Text + " (the game set its own mode)"
+                : res.Last == ModeKeeper.Verdict.GiveUp ? res.Text + " (reset by Windows)" : res.Text) + " – " + DisplayName(res.Game);
             return hdrGames.Count > 0 || recorder != null || displays.Any(d => d.On) ? hdr + "\n" + mode : mode;   // "Waiting for a game" adds nothing here
         }
 
