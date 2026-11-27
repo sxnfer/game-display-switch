@@ -117,6 +117,9 @@ namespace HdrSwitch
             public Resolution.Mode Area;         // the competitive area Mode is stretched over – or null: Mode is the area itself, shown 1:1
             public string Game;
             public int ScalingBack = -1;         // the NVIDIA scaling setting to put back, or -1 if this app didn't change it
+            public bool ScalingPending;          // No scaling couldn't be taken (the desktop wasn't at its saved mode): tried again with the next re-apply
+            public Resolution.Mode FellBack;     // the stretched resolution the profile asks for, when the plain area is used instead (Fallback.cs)
+            public bool Unverified;              // a stretched mode that didn't show as stretched right after it was set: VerifyStretch looks again
             // Keeping it while the game runs (ModeKeeper.cs):
             public bool Centred;                 // a 1:1 mode was shown centred right after it was set: losing that is a reset
             public readonly List<long> Reapplied = new List<long>();   // when it was set again after a reset, for the budget
@@ -141,8 +144,6 @@ namespace HdrSwitch
         readonly EventHandler onDisplayChanged;
         readonly HashSet<string> hinted = new HashSet<string>();      // games already told "restart if HDR is greyed out"
         readonly HashSet<string> resHinted = new HashSet<string>();   // games already told "restart if it doesn't fit"
-        readonly HashSet<string> resFailed = new HashSet<string>();   // games already told their resolution doesn't exist
-        bool resWarned;                                               // told once that the driver isn't centring
 
         HashSet<string> games = new HashSet<string>();
         HashSet<string> excluded = new HashSet<string>();                 // "-name.exe" lines: never switch, never re-added by a scan
@@ -215,6 +216,7 @@ namespace HdrSwitch
             scanTimer.Tick += (s, e) => { Rescan(); FollowGameScreens(); ScanMode(); island.Poll(); if (updateExe != null) FinishUpdate(); };
             steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); SwitchLog.Write("steam-timeout", "running", running.Count, SwitchLog.Then, "no game appeared within 60 s of Play: settling"); Settle(); };
             reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); LoadRecorders(); LoadBrightness(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
+            stretchVerify.Tick += (s, e) => VerifyStretch();
             modeCheck.Tick += (s, e) => { modeCheck.Stop(); OnDisplayChanged(false); };   // also Resume, unlock, after HDR, a retry: see CheckSoon
             LogSystemEvents(true);
             SwitchLog.Write("start", "version", Updater.CurrentText, "games", games.Count, "profiles", profiles.Count, "target", TargetGdi(), "why", TargetWhy(),
@@ -434,6 +436,7 @@ namespace HdrSwitch
             sdrTimer.Stop();
             island.End("sdr");
             steamTimeout.Stop();
+            NoteLaunch(name, false);
             // HDR first, the mode after it: switching HDR makes Windows reapply the saved display mode, which would
             // throw away a competitive mode set just before. A mode change leaves HDR alone.
             bool hdr = games.Contains(name) && SwitchOn(name);
@@ -525,6 +528,7 @@ namespace HdrSwitch
             SwitchLog.Write("steam-running", "appId", appId, "label", label, "exe", name, "hdrListed", games.Contains(name), "profiled", profiles.ContainsKey(name), SwitchLog.Then, "switching before the game starts");
             sdrTimer.Stop();
             island.End("sdr");
+            NoteLaunch(name, true);
             bool hdr = games.Contains(name) && SwitchOn(name);              // HDR first – see Track
             bool mode = profiles.ContainsKey(name) && ApplyResolution(name);
             if (hdr || mode) AnnounceGame(name, hdr);
@@ -1090,22 +1094,38 @@ namespace HdrSwitch
                 SwitchLog.Write("apply", "game", name, "want", p, "display", gdi, "why", TargetWhy(), SwitchLog.Then, "skipped (Windows gave no current mode for this display)");
                 return false;
             }
-            var area = new Resolution.Mode { Width = p.Width, Height = p.Height, Hz = p.Hz > 0 ? p.Hz : now.Hz };
+            notices.Clear(name);   // a new switch: what was wrong last time is kept only if it comes up again
+            int wantHz = p.Hz > 0 ? p.Hz : now.Hz;
+            var area = new Resolution.Mode { Width = p.Width, Height = p.Height, Hz = wantHz };
             // A game in borderless mode can have a lower resolution of its own, stretched over the competitive one.
             Resolution.Mode own = StretchOf(name);
             if (own == null && stretches.ContainsKey(name))
+            {
                 SwitchLog.Write("apply-stretch", "game", name, "stretch", stretches[name], "area", area, SwitchLog.Then, "stretch dropped (it doesn't fit inside the area): the plain area is used");
-            if (own == null && stretches.ContainsKey(name) && resFailed.Add(name + "/fit"))
-                Hint(stretches[name].Text + " doesn't fit inside " + area.Text + ", so " + DisplayName(name) + " isn't stretched. Pick a smaller one.");
-            bool stretch = own != null;
-            var mode = stretch ? new Resolution.Mode { Width = own.Width, Height = own.Height, Hz = area.Hz } : area;
+                Problem(name, "fit", stretches[name].Text + " doesn't fit inside " + area.Text + ", so " + DisplayName(name) + " isn't stretched. Pick a smaller one.");
+            }
+            var wanted = own != null ? new Resolution.Mode { Width = own.Width, Height = own.Height, Hz = wantHz } : area;
+            // What exists decides: the stretch at the wanted rate, else the plain area, else a lower rate (Fallback.cs).
+            var areaRates = Resolution.Rates(gdi, area.Width, area.Height);
+            var ownRates = own == null ? null : Resolution.Rates(gdi, own.Width, own.Height);
+            var plan = Fallback.Choose(area, own, wantHz, p.Hz > 0, now.Hz, areaRates, ownRates, DisplayName(name));
+            var mode = plan.Mode ?? wanted;
+            bool stretch = plan.Area != null;
+            if (plan.Mode != null) area = plan.Area ?? plan.Mode;
             // What every "apply" line starts with: the game, the display and why it was picked, what is wanted, what is there.
-            var asked = SwitchLog.Pairs("game", name, "display", gdi, "why", TargetWhy(), "want", mode, "area", stretch ? area : null, "profileHz", p.Hz > 0 ? p.Hz + "" : "current",
-                "current", now, "saved", Resolution.Saved(gdi));
+            var asked = SwitchLog.Pairs("game", name, "display", gdi, "why", TargetWhy(), "want", wanted, "area", own != null ? new Resolution.Mode { Width = p.Width, Height = p.Height, Hz = wantHz } : null, "profileHz", p.Hz > 0 ? p.Hz + "" : "current",
+                "current", now, "saved", Resolution.Saved(gdi), "plan", plan.Why);
             if (leftover != null && (leftover.Gdi != gdi || !leftover.Mode.Same(now)))   // gone since: nothing of ours is left
             {
                 leftover = null;
                 if (strayScaling < 0) DeleteState();
+            }
+            if (plan.Mode == null)
+            {
+                SwitchLog.Write("apply", asked, "sizeExistsAtHz", RatesText(gdi, wanted.Width, wanted.Height), "areaExistsAtHz", own != null ? RatesText(gdi, area.Width, area.Height) : null, SwitchLog.Then,
+                    "unavailable (the display has no " + wanted.Width + "x" + wanted.Height + " at " + wantHz + " Hz" + (own != null ? ", and not the plain area either" : "") + ": nothing switched)");
+                Problem(name, plan.Reason, plan.Message);
+                return false;
             }
             if (mode.Same(now) && (!stretch || Resolution.Stretched(gdi, area.Width, area.Height)))
             {
@@ -1116,76 +1136,71 @@ namespace HdrSwitch
                 }
                 // Already in that mode because this app left it there (Windows refused to put it back): it is ours, so it
                 // is tracked and put back like one set just now, and the scaling is taken as usual.
-                if (stretch) SwitchLog.Write("scaling-take", "display", gdi, SwitchLog.Then, "not taken (a stretched resolution: NVIDIA's scaling setting is left as it is)");
                 var kept = new ActiveMode { Gdi = gdi, Id = DisplayIdOf(gdi), Mode = mode, Area = stretch ? area : null, Back = leftover.Back ?? Resolution.Saved(gdi), Game = name,
-                    ScalingBack = stretch ? -1 : TakeScaling(gdi) };
+                    ScalingBack = TakeScaling(gdi), FellBack = plan.Kind == Fallback.Kind.NoStretch ? own : null };
+                kept.ScalingPending = lastTake == Fallback.Take.NotAtSaved;
                 kept.Centred = !stretch && Centred(Resolution.Read(gdi));
                 leftover = null;
                 res = kept;
                 SaveState();
                 SwitchLog.Write("apply", asked, "back", kept.Back, "scalingBack", kept.ScalingBack, "picture", Resolution.Read(gdi), SwitchLog.Then,
                     "taken over (the desktop is already in this mode, left there by this app when it couldn't be put back: tracked again, put back when the game closes)");
+                Problem(name, plan.Reason, plan.Message);
+                ScalingProblem(name);
                 return false;
             }
-            if (!Resolution.Available(gdi, mode.Width, mode.Height, mode.Hz))
-            {
-                bool told = resFailed.Contains(name);
-                SwitchLog.Write("apply", asked, "sizeExistsAtHz", RatesText(gdi, mode.Width, mode.Height), "areaExistsAtHz", stretch ? RatesText(gdi, area.Width, area.Height) : null, SwitchLog.Then,
-                    "unavailable (the display has no " + mode.Width + "x" + mode.Height + " at " + mode.Hz + " Hz: nothing switched" + (stretch ? ", the plain area neither" : "")
-                    + (told ? "; the notification about it was already shown once" : "") + ")");
-                if (resFailed.Add(name))
-                    Hint("No " + mode.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ". Create it as a custom resolution in NVIDIA Control Panel.");
-                return false;
-            }
+            Problem(name, plan.Reason, plan.Message);   // not what the profile asks for: said before it shows
             var before = Resolution.Read(gdi);
-            // Before the mode: the game's own mode change must find No scaling already set. A stretched mode needs no
-            // driver setting – it only lasts while the game sets no mode of its own.
-            if (stretch) SwitchLog.Write("scaling-take", "display", gdi, SwitchLog.Then, "not taken (a stretched resolution: NVIDIA's scaling setting is left as it is)");
-            int scalingBack = stretch ? -1 : TakeScaling(gdi);
-            var active = new ActiveMode { Gdi = gdi, Id = DisplayIdOf(gdi), Mode = mode, Area = stretch ? area : null, Back = Resolution.Saved(gdi) ?? now, Game = name, ScalingBack = scalingBack };
-            if (!SetMode(active))
+            // Before the mode: the game's own mode change must find No scaling already set. For a stretched mode too –
+            // it only lasts while the game sets no mode of its own, and a game that does is then shown 1:1 in the middle
+            // rather than over the whole panel.
+            int scalingBack = TakeScaling(gdi);
+            var active = new ActiveMode { Gdi = gdi, Id = DisplayIdOf(gdi), Mode = mode, Area = stretch ? area : null, Back = Resolution.Saved(gdi) ?? now, Game = name, ScalingBack = scalingBack,
+                ScalingPending = lastTake == Fallback.Take.NotAtSaved, FellBack = plan.Kind == Fallback.Kind.NoStretch ? own : null };
+            ScalingProblem(name);
+            bool ok = SetMode(active);
+            string trace = SetModeTrace(active);
+            if (!ok && stretch)
             {
-                SwitchLog.Write("apply", asked, "pictureBefore", before, "scalingBack", scalingBack, "how", SetModeTrace(active), "now", Resolution.Current(gdi), SwitchLog.Then,
-                    "failed (Windows refused the mode: " + SetModeTrace(active) + ")");
+                // The driver wouldn't stretch it (ApplyStretched has put the saved mode back): the plain area instead.
+                SwitchLog.Write("apply", asked, "pictureBefore", before, "scalingBack", scalingBack, "how", trace, "now", Resolution.Current(gdi), SwitchLog.Then,
+                    "the stretch FAILED (Windows refused it: " + trace + "): falling back to the plain area");
+                ok = FallBackToArea(active);
+                if (ok)
+                {
+                    stretch = false;
+                    trace += ",fallback(cds=" + SwitchLog.CdsName(Resolution.LastCds) + ")";
+                    Problem(name, "stretch-failed", Fallback.StretchFailedText(mode, area));
+                    mode = active.Mode;
+                }
+            }
+            if (!ok)
+            {
+                SwitchLog.Write("apply", asked, "pictureBefore", before, "scalingBack", scalingBack, "how", trace, "now", Resolution.Current(gdi), SwitchLog.Then,
+                    "failed (Windows refused the mode: " + trace + ")");
                 RestoreScaling(gdi, scalingBack);
-                if (resFailed.Add(name)) Hint("Couldn't switch to " + active.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ".");
+                Problem(name, "refused", "Couldn't switch to " + active.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ".");
                 return false;
             }
             res = active;
             leftover = null;
-            SwitchLog.Write("apply", asked, "back", active.Back, "scalingBack", scalingBack, "how", SetModeTrace(active), SwitchLog.Then, stretch ? "applied (stretched over the area)" : "applied (1:1, centred)");
+            SwitchLog.Write("apply", asked, "back", active.Back, "scalingBack", scalingBack, "how", trace, SwitchLog.Then,
+                stretch ? "applied (stretched over the area)" : active.FellBack != null ? "applied (1:1, centred: the plain area, without the stretch)" : "applied (1:1, centred)");
             SaveState();
             if (KeepHdr()) KeepMode();   // putting HDR back would itself reset the mode
             if (res != active) return false;   // let go of meanwhile (see CheckMode)
-            if (stretch)
+            if (active.Area != null)
             {
+                // SetDisplayConfig saying yes isn't the stretch showing: looked at now, and once more in 500 ms if not.
                 bool held = Resolution.Stretched(gdi, area.Width, area.Height);
                 SwitchLog.Write("picture", "game", name, "display", gdi, "before", before, "after", Resolution.Read(gdi), "now", Resolution.Current(gdi), "stretched", held, SwitchLog.Then,
-                    held ? "the desktop is stretched over the area" : "NOT stretched over the area after the switch (not checked by the app: nothing is done about it)");
+                    held ? "the desktop is stretched over the area" : "NOT stretched over the area after the switch: looked at again in 500 ms, then set once more or replaced by the plain area");
+                active.Unverified = !held;
+                stretchVerify.Stop();
+                if (!held) stretchVerify.Start();
+                return true;
             }
-            if (stretch) return true;    // what follows is about the driver centring a 1:1 mode
-
-            // The panel should still get its native signal, with the smaller desktop centred in it.
-            var after = Resolution.Read(gdi);
-            active.Centred = Centred(after);   // only a mode that was centred can lose that later (see ModeKeeper.cs)
-            SwitchLog.Write("picture", "game", name, "display", gdi, "before", before, "after", after, "now", Resolution.Current(gdi), "nvidia", SwitchLog.NvidiaName(Nvidia.Scaling(gdi)), SwitchLog.Then,
-                before == null || after == null ? "the display path couldn't be read: not checked"
-                : after.TargetW != before.TargetW || after.TargetH != before.TargetH ? "the signal to the panel changed size: the monitor is scaling" + (resWarned ? " (warned earlier this session: no notification)" : "")
-                : !after.Centered ? "not centred: the driver stretches it" + (resWarned ? " (warned earlier this session: no notification)" : "")
-                : "centred 1:1, the panel keeps its signal");
-            if (!resWarned && before != null && after != null)
-            {
-                if (after.TargetW != before.TargetW || after.TargetH != before.TargetH)
-                {
-                    resWarned = true;
-                    Hint("The monitor is scaling " + mode.Text + ". In NVIDIA Control Panel › Adjust desktop size and position, choose No scaling on the GPU.");
-                }
-                else if (!after.Centered)
-                {
-                    resWarned = true;
-                    Hint(mode.Text + " is being stretched. In NVIDIA Control Panel › Adjust desktop size and position, untick Override the scaling mode.");
-                }
-            }
+            CheckCentred(active, name, before);   // the panel should still get its native signal, with the smaller desktop centred in it
             return true;
         }
 
@@ -1271,12 +1286,14 @@ namespace HdrSwitch
         int TakeScaling(string gdi)
         {
             int s = Nvidia.Scaling(gdi);
+            lastTake = Fallback.Take.Unreadable;
             if (s < 0)
             {
                 SwitchLog.Write("scaling-take", "display", gdi, "nvidia", SwitchLog.NvidiaName(s), SwitchLog.Then,
                     "not taken (the setting couldn't be read: no NVIDIA driver, another GPU's display, or the driver answered with an error) – a game in exclusive fullscreen is scaled as the driver is set");
                 return -1;
             }
+            lastTake = Fallback.Take.AlreadyCentres;
             if (Nvidia.Centres(s))
             {
                 if (strayScaling >= 0 && strayDisplay != null && GdiOf(strayDisplay) != gdi)   // another display's: put back on its own
@@ -1297,42 +1314,53 @@ namespace HdrSwitch
             // only ever changed while the desktop is at the mode saved in display settings, never at a temporary one.
             if (!Resolution.AtSaved(gdi))
             {
+                lastTake = Fallback.Take.NotAtSaved;
                 SwitchLog.Write("scaling-take", "display", gdi, "nvidia", SwitchLog.NvidiaName(s), ModesOf(gdi), SwitchLog.Then,
-                    "not taken (the desktop isn't at its saved mode, and the driver would save this one with the setting) – a game in exclusive fullscreen is scaled as " + SwitchLog.NvidiaName(s));
+                    "not taken (the desktop isn't at its saved mode, and the driver would save this one with the setting): tried again when our mode is next set from the saved one – until then a game in exclusive fullscreen is scaled as " + SwitchLog.NvidiaName(s));
                 return -1;
             }
             bool set = Nvidia.SetScaling(gdi, Nvidia.NoScaling);
-            SwitchLog.Write("scaling-take", "display", gdi, "before", SwitchLog.NvidiaName(s), "after", SwitchLog.NvidiaName(Nvidia.Scaling(gdi)), SwitchLog.Then,
-                set ? "taken (No scaling until the game closes)" : "FAILED (the driver refused No scaling) – a game in exclusive fullscreen is scaled as " + SwitchLog.NvidiaName(s));
-            return set ? s : -1;
+            int after = Nvidia.Scaling(gdi);   // read back: the driver saying yes isn't the setting being there
+            lastTake = Fallback.Took(set, after);
+            SwitchLog.Write("scaling-take", "display", gdi, "before", SwitchLog.NvidiaName(s), "setAnswered", set, "after", SwitchLog.NvidiaName(after), SwitchLog.Then,
+                lastTake == Fallback.Take.Taken ? "taken (No scaling until the game closes)"
+                : lastTake == Fallback.Take.Unverified ? "taken, not verified (the driver took No scaling, but the setting can't be read back): put back when the game closes"
+                : lastTake == Fallback.Take.NotStuck ? "DID NOT STICK (the driver took No scaling, but the setting reads " + SwitchLog.NvidiaName(after) + ") – a game in exclusive fullscreen is scaled as that; nothing to put back"
+                : "FAILED (the driver refused No scaling) – a game in exclusive fullscreen is scaled as " + SwitchLog.NvidiaName(after < 0 ? s : after));
+            return Fallback.Changed(lastTake) ? s : -1;
         }
 
         /// <summary>
         /// Puts the scaling setting back – only if it is still the No scaling this app set. If the desktop isn't at its saved
-        /// mode right now (another game's own mode, say), it is kept for later: the next display change or grace period.
+        /// mode right now (another game's own mode, say) or the setting can't be read, it is kept for later: the next
+        /// display change or grace period. Decided by Fallback.RestoreScaling.
         /// </summary>
         void RestoreScaling(string gdi, int back)
         {
-            if (back < 0)   // nothing to do
+            int set = back < 0 ? -1 : Nvidia.Scaling(gdi);
+            bool atSaved = back >= 0 && Resolution.AtSaved(gdi);
+            var what = Fallback.RestoreScaling(set, back, atSaved);
+            if (what == Fallback.Restore.Nothing)
             {
                 SwitchLog.Write("scaling-restore", "display", gdi, SwitchLog.Then, "nothing to put back (this app didn't change it)");
                 return;
             }
-            int set = Nvidia.Scaling(gdi);
-            if (set != Nvidia.NoScaling)   // the user changed it
+            if (what == Fallback.Restore.UserChanged)
             {
                 SwitchLog.Write("scaling-restore", "display", gdi, "nvidia", SwitchLog.NvidiaName(set), "back", SwitchLog.NvidiaName(back), SwitchLog.Then,
-                    "left alone (it is no longer the No scaling this app set: changed elsewhere, or unreadable)");
+                    "left alone (it reads as another setting than the No scaling this app set: changed elsewhere, that one is kept)");
                 return;
             }
-            bool atSaved = Resolution.AtSaved(gdi);
-            if (atSaved && Nvidia.SetScaling(gdi, back))
+            if (what == Fallback.Restore.PutBack && Nvidia.SetScaling(gdi, back))
             {
                 SwitchLog.Write("scaling-restore", "display", gdi, "before", SwitchLog.NvidiaName(set), "after", SwitchLog.NvidiaName(Nvidia.Scaling(gdi)), SwitchLog.Then, "put back to " + SwitchLog.NvidiaName(back));
                 return;
             }
+            // Kept, here and in resolution.state. An unreadable setting is not one the user changed: the driver may only
+            // be busy (a mode change under way, the display asleep), and the original would be lost for good.
             SwitchLog.Write("scaling-restore", "display", gdi, "nvidia", SwitchLog.NvidiaName(set), "back", SwitchLog.NvidiaName(back), ModesOf(gdi), SwitchLog.Then,
-                atSaved ? "deferred (the driver refused): tried again at the next display change or grace period"
+                what == Fallback.Restore.Unreadable ? "deferred (the setting can't be read right now, which doesn't mean it was changed): " + SwitchLog.NvidiaName(back) + " is kept and tried again at the next display change or grace period"
+                    : what == Fallback.Restore.PutBack ? "deferred (the driver refused): tried again at the next display change or grace period"
                     : "deferred (the desktop isn't at its saved mode): tried again at the next display change or grace period");
             strayScaling = back;
             strayDisplay = DisplayIdOf(gdi);
@@ -1504,8 +1532,10 @@ namespace HdrSwitch
         static bool Matches(ActiveMode a, Resolution.Mode p, Resolution.Mode own)
         {
             var area = a.Area ?? a.Mode;
-            if (p.Width != area.Width || p.Height != area.Height || (p.Hz != 0 && p.Hz != a.Mode.Hz)) return false;
-            return a.Area == null ? own == null : own != null && own.Width == a.Mode.Width && own.Height == a.Mode.Height;
+            if (p.Width != area.Width || p.Height != area.Height || (p.Hz != 0 && Math.Abs(p.Hz - a.Mode.Hz) > 1)) return false;   // one Hz off is the same rate (Fallback.Rate)
+            // A plain area used because the stretch couldn't be had (Fallback.cs) is still that profile's mode.
+            if (a.Area == null) return own == null || (a.FellBack != null && own.Width == a.FellBack.Width && own.Height == a.FellBack.Height);
+            return own != null && own.Width == a.Mode.Width && own.Height == a.Mode.Height;
         }
 
         /// <summary>The game's own resolution to stretch over its competitive one – or null: it has none, or it doesn't fit.</summary>
@@ -1653,9 +1683,7 @@ namespace HdrSwitch
         /// <summary>A game's profile changed: it gets its one-time notices again.</summary>
         void ForgetNotices(string name)
         {
-            resFailed.Remove(name);
-            resFailed.Remove(name + "/fit");
-            resFailed.Remove(name + "/own");
+            notices.Forget(name);
         }
 
         static readonly string[] ProfileHeader =
@@ -2313,6 +2341,7 @@ namespace HdrSwitch
             SwitchLog.Write("exit", "ours", OursText(res), "hdrOwned", owned.Count, "running", running.Count, SwitchLog.Then, "putting back whatever is still switched");
             scanTimer.Stop();
             modeCheck.Stop();
+            stretchVerify.Stop();
             sdrTimer.Stop();
             steamTimeout.Stop();
             foreach (var r in running.Values.Where(x => x.Wait != null))

@@ -439,7 +439,7 @@ namespace HdrSwitch
                 y = st.Bottom + G;
                 int top = y, from = items.Count;
 
-                string hint = SetupHint(gi, app.notice, gi.Area == null || Offered(gdi, gi.Area, hz), gi.Stretch == null || Offered(gdi, gi.Stretch, hz), hz);
+                string hint = SetupHint(gi, app.notice, gi.Area == null || Offered(gdi, gi.Area, hz), gi.Stretch == null || Offered(gdi, gi.Stretch, hz), hz, app.ProblemOf(name));
                 if (hint != null) y += HintBar(new Rectangle(M, y, cw, 0), hint) + G;
 
                 // HDR: on, or never.
