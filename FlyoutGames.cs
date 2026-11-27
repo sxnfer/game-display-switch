@@ -90,10 +90,21 @@ namespace HdrSwitch
                 catch (Exception e) { Guard.Log("Reading Windows' SDR brightness", e); return -1; }
             }
 
+            /// <summary>
+            /// The display the open game's resolution goes on, as ApplyResolution picks it: the screen the game was on last
+            /// time if it is connected, else the main one (Follow.TargetDisplay). Its sizes, rates and panel are what the
+            /// page, its lists and the creator show.
+            /// </summary>
+            string PageGdi()
+            {
+                string why;
+                return app.TargetGdiFor(page, out why);
+            }
+
             bool ReadNvidia()
             {
                 if (sample != null) return sample.Nvidia;
-                try { return Nvidia.Scaling(TargetGdi()) >= 0; }
+                try { return Nvidia.Scaling(PageGdi()) >= 0; }
                 catch (Exception e) { Guard.Log("Asking the NVIDIA driver", e); return false; }
             }
 
@@ -191,7 +202,7 @@ namespace HdrSwitch
             void ScreenNow(out string gdi, out Resolution.Mode full, out double inches)
             {
                 if (sample != null) { gdi = null; full = sample.Full; inches = sample.Inches; return; }
-                gdi = TargetGdi();
+                gdi = PageGdi();
                 var cur = Resolution.Current(gdi);
                 var pic = Resolution.Read(gdi);   // the panel's own size is the target of the display path
                 full = pic != null ? new Resolution.Mode { Width = pic.TargetW, Height = pic.TargetH, Hz = cur != null ? cur.Hz : 0 } : cur;
@@ -212,7 +223,7 @@ namespace HdrSwitch
                 Resolution.Mode chosen;
                 app.profiles.TryGetValue(game, out chosen);
                 if (chosen != null && chosen.Hz > 0) return chosen.Hz;
-                var cur = sample != null ? sample.Current : Resolution.Current(TargetGdi());
+                var cur = sample != null ? sample.Current : Resolution.Current(PageGdi());
                 return cur != null ? cur.Hz : 60;
             }
 
