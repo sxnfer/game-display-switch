@@ -63,6 +63,11 @@ namespace HdrSwitch
                 Environment.ExitCode = Island.RenderSample(args);
                 return;
             }
+            if (args.Contains(Creator.ApplyFlag) || args.Contains(Creator.UndoFlag))   // the resolution creator's elevated copy (Creator.cs): one registry job, then it exits
+            {
+                Environment.ExitCode = Creator.Elevated(args);
+                return;
+            }
             if (args.Contains("--island-demo"))   // a preview of the island alone: before the mutex, so it runs beside an installed copy
             {
                 Application.EnableVisualStyles();

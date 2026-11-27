@@ -360,7 +360,7 @@ namespace HdrSwitch
             Resolution.Mode missing = g.Area != null && !areaExists ? g.Area : g.Area != null && g.Stretch != null && !stretchExists ? g.Stretch : null;
             if (missing == null) return null;
             return g.Nvidia
-                ? "Create " + missing.Text + " at " + hz + " Hz in NVIDIA Control Panel (Change resolution › Customize) before it can switch."
+                ? "Create " + missing.Text + " at " + hz + " Hz before it can switch: Create… under Competitive area, or NVIDIA Control Panel (Change resolution › Customize)."
                 : "The display has no " + missing.Text + " at " + hz + " Hz. Create it as a custom resolution in the graphics driver first.";
         }
 
