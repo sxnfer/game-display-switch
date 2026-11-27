@@ -99,6 +99,7 @@ namespace HdrSwitch
             bool entered;         // a view was just entered: the keyboard starts on its first row
             bool returned;        // just back from a view: the keyboard is on the control that opened it
             bool repeat;          // the key being handled is held down (auto-repeat): it moves, but never presses
+            bool logEmpty;        // Settings' Switch log row was asked to open a log with nothing in it yet: the row says so
             int wheel;            // what the wheel moved that is less than a pixel, kept for its next turn
             string screenName;    // the monitor it opened on: it stays there until it closes
             readonly Spring open = Motion.Open(0);           // 0 hidden → 1 in place: it slides in from the taskbar
@@ -1132,8 +1133,8 @@ namespace HdrSwitch
 
             /// <summary>
             /// The Settings tab, in two groups as Windows' Settings has them. Switching: the wait before switching back,
-            /// SDR while recording, the pause shortcut. App: start with Windows, the island, updates. The footer bar says
-            /// where the files are, opens that folder, and exits.
+            /// SDR while recording, the pause shortcut. App: start with Windows, the island, updates, the switch log. The
+            /// footer bar says where the files are, opens that folder, and exits.
             /// </summary>
             int BuildSettings(int W, int M, int y)
             {
@@ -1180,7 +1181,7 @@ namespace HdrSwitch
 
                 Section("App", M, y, secH);
                 y += secH;
-                Group(new Rectangle(M, y, cw, 3 * rowCH), 3);
+                Group(new Rectangle(M, y, cw, 4 * rowCH), 4);
                 CardToggle(new Rectangle(M, y, cw, rowCH), "startup", "power", "Start with Windows", "Runs in the tray", IsStartupNow(), true, false,
                     () => { SetStartup(!IsStartup()); Rebuild(); }, false);
                 CardToggle(new Rectangle(M, y + rowCH, cw, rowCH), "island", "island", "Island", "A pill at the top of the screen", app.islandOn, false, false,
@@ -1200,7 +1201,21 @@ namespace HdrSwitch
                     Draw(g, version, fonts.Caption, P.Ink(P.Text2, P.CardSolid), new Rectangle(vx, rc.Y, verW, rc.Height), TfLeft | TextFormatFlags.Right);
                 } });
                 if (hasUpdate) UpdateButton(new Rectangle(ur.Right - S(12) - btnW, ur.Y + (rowCH - S(32)) / 2, btnW, S(32)), P.CardSolid);
-                y += 3 * rowCH;
+                // The switch log: every HDR, resolution and scaling decision, one line each (SwitchLog.cs). Open shows it
+                // in the editor Windows opens .log files with.
+                var lr = new Rectangle(M, y + 3 * rowCH, cw, rowCH);
+                int logW = TextRenderer.MeasureText("Open", fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                string logDesc = logEmpty ? "Empty so far: nothing has been switched yet" : "What Display Switch did, line by line";
+                items.Add(new Item { Rect = lr, Key = "switchlog", Role = AccessibleRole.StaticText, Name = "Switch log", Tip = logDesc,
+                    Paint = (g, rc, lk) => RowText(g, rc, "log", "Switch log", logDesc, 0, S(12) + logW + S(12)) });
+                items.Add(new Item { Rect = new Rectangle(lr.Right - S(12) - logW, lr.Y + (rowCH - S(32)) / 2, logW, S(32)), Key = "openlog", Name = "Open the switch log", Tip = SwitchLog.LogFile, Click = () =>
+                {
+                    if (sample != null) return;
+                    logEmpty = !OpenSwitchLog();
+                    if (logEmpty) Rebuild();
+                    else Dismiss(true);   // at once: the editor is about to come to the front
+                }, Paint = (g, rc, lk) => StandardButton(g, rc, lk, P.CardSolid, null, "Open") });
+                y += 4 * rowCH;
                 int content = y - top + S(4);
 
                 // The footer bar: where the files are, open that folder, exit.
@@ -1455,7 +1470,7 @@ namespace HdrSwitch
 
             /// <summary>
             /// A 16 px line icon, centred in box, drawn like Segoe Fluent's (and the mockup's): the five layers (hdr,
-            /// bright, area, stretch, scaling) and the settings (clock, rec, pause, power, island, update). Drawn rather
+            /// bright, area, stretch, scaling) and the settings (clock, rec, pause, power, island, update, log). Drawn rather
             /// than taken from the icon font, which has no symbol for most of them.
             /// </summary>
             void LineIcon(Graphics g, string key, Rectangle box, Color c)
@@ -1512,6 +1527,10 @@ namespace HdrSwitch
                             line(8, 2, 8, 10);
                             g.DrawLines(pen, new[] { P_(4.5f, 6.5f), P_(8, 10), P_(11.5f, 6.5f) });
                             line(2.5f, 13.5f, 13.5f, 13.5f);
+                            break;
+                        case "log":      // a page of lines
+                            box_(R(2.5f, 1.5f, 11, 13), 1);
+                            line(5, 5, 11, 5); line(5, 8, 11, 8); line(5, 11, 9, 11);
                             break;
                         case "chev":     // a row that opens a page or a list
                             g.DrawLines(pen, new[] { P_(6, 3.5f), P_(10.5f, 8), P_(6, 12.5f) });
