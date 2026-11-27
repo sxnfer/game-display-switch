@@ -441,7 +441,7 @@ namespace HdrSwitch
                 y = st.Bottom + G;
                 int top = y, from = items.Count;
 
-                string hint = SetupHint(gi, app.notice, gi.Area == null || Offered(gdi, gi.Area, hz), gi.Stretch == null || Offered(gdi, gi.Stretch, hz), hz);
+                string hint = SetupHint(gi, app.notice, gi.Area == null || Offered(gdi, gi.Area, hz), gi.Stretch == null || Offered(gdi, gi.Stretch, hz), hz, app.ProblemOf(name));
                 if (hint != null) y += HintBar(new Rectangle(M, y, cw, 0), hint) + G;
 
                 // HDR: on, or never.
@@ -470,7 +470,7 @@ namespace HdrSwitch
             }
 
             /// <summary>
-            /// A setup hint on the page, as WinUI's InfoBar (warning): what has to be created in NVIDIA Control Panel, or
+            /// A setup hint on the page, as WinUI's InfoBar (warning): what has to be created (in the creator or NVIDIA Control Panel), or
             /// the latest notification about this game. Returns its height.
             /// </summary>
             int HintBar(Rectangle r, string text)

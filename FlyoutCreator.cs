@@ -130,7 +130,7 @@ namespace HdrSwitch
                         for (int i = 0; i < 30 && !listed; i++)
                         {
                             Thread.Sleep(500);
-                            try { listed = Resolution.Available(job.Gdi, job.Width, job.Height, job.Hz); }
+                            try { listed = Fallback.Near(job.Hz, Resolution.Rates(job.Gdi, job.Width, job.Height)) > 0; }
                             catch (Exception e) { Guard.Log("Asking for the new resolution", e); }
                         }
                     }
@@ -440,7 +440,7 @@ namespace HdrSwitch
             {
                 if (size == null) return false;
                 if (sample != null) return sample.Modes.Any(m => m.Width == size.Width && m.Height == size.Height);
-                try { return Resolution.Available(crScreen.Gdi, size.Width, size.Height, (int)Math.Round(crRate)); }
+                try { return Fallback.Near((int)Math.Round(crRate), Resolution.Rates(crScreen.Gdi, size.Width, size.Height)) > 0; }
                 catch (Exception e) { Guard.Log("Asking for a resolution", e); return false; }
             }
 
