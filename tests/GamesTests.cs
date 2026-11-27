@@ -99,7 +99,7 @@ namespace HdrSwitch.Tests
         {
             var g = Game(true, -1, M(2304, 1296));
             Run.Equal(null, TrayApp.SetupHint(g, null, true, true, 240), "the display has the area: nothing to set up");
-            Run.Equal("Create 2304 × 1296 at 240 Hz in NVIDIA Control Panel (Change resolution › Customize) before it can switch.",
+            Run.Equal("Create 2304 × 1296 at 240 Hz before it can switch: Create… under Competitive area, or NVIDIA Control Panel (Change resolution › Customize).",
                 TrayApp.SetupHint(g, null, false, true, 240), "the area is missing: create it");
             var s = Game(true, -1, M(2368, 1332), M(1776, 1332));
             Run.True(TrayApp.SetupHint(s, null, true, false, 240).StartsWith("Create 1776 × 1332 at 240 Hz"), "the stretched resolution is missing: create that");

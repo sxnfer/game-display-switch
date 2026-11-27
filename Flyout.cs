@@ -361,7 +361,7 @@ namespace HdrSwitch
             protected override void OnDeactivate(EventArgs e)
             {
                 base.OnDeactivate(e);
-                if (Visible && !closing) Dismiss(false);
+                if (Visible && !closing && !KeepOpen()) Dismiss(false);   // not under a UAC prompt or a folder dialog of its own
             }
 
             /// <summary>Every key passes here first: notes whether it is held down, which Windows marks in bit 30.</summary>
@@ -511,6 +511,7 @@ namespace HdrSwitch
             /// <summary>The back button, Backspace and Esc: one view up.</summary>
             void GoBack()
             {
+                if (sub == "create" && CreatorBack()) return;   // the creator's confirmation and result go back to its form first
                 if (sub != null) sub = null;
                 else if (page != null) LeavePage();
                 else picking = false;
@@ -1132,8 +1133,9 @@ namespace HdrSwitch
             // ---- Settings: everything that isn't per game ----
 
             /// <summary>
-            /// The Settings tab, in two groups as Windows' Settings has them. Switching: the wait before switching back,
-            /// SDR while recording, the pause shortcut. App: start with Windows, the island, updates, the switch log. The
+            /// The Settings tab, in groups as Windows' Settings has them. Switching: the wait before switching back,
+            /// SDR while recording, the pause shortcut. Resolutions: CRU's folder and the resolutions added to a monitor
+            /// (FlyoutCreator.cs). App: start with Windows, the island, updates, the switch log. The
             /// footer bar says where the files are, opens that folder, and exits.
             /// </summary>
             int BuildSettings(int W, int M, int y)
@@ -1178,6 +1180,8 @@ namespace HdrSwitch
                     Draw(g, keys, fonts.Caption, P.Ink(P.Text2, P.CardSolid), new Rectangle(rc.Right - S(12) - keysW, rc.Y, keysW, rc.Height), TfLeft | TextFormatFlags.Right);
                 } });
                 y += 3 * rowCH;
+
+                y = SettingsResolutions(M, cw, y, rowCH, secH);
 
                 Section("App", M, y, secH);
                 y += secH;
@@ -1315,6 +1319,8 @@ namespace HdrSwitch
                 public bool Nvidia = true;     // an NVIDIA driver runs the display
                 public int WindowsLevel = 20;  // Windows' own SDR brightness
                 public int Grace = -1;         // seconds left of the wait before switching back, or -1
+                public string Creator = "ready";   // the creator's state: no-cru, ready, exists, confirm, busy, done, failed
+                public List<string> Backups = new List<string>();   // the monitors resolutions were added to
             }
 
             internal Sample sample;   // null: ask Windows, as always
@@ -1339,8 +1345,9 @@ namespace HdrSwitch
                 rolls.Clear();
                 picking = view == "add";
                 search = find ?? "";
-                if (view == "game" || view == "res" || view == "stretch") EnterPage(game);
-                sub = view == "res" || view == "stretch" ? view : null;
+                if (view == "game" || view == "res" || view == "stretch" || view == "creator") EnterPage(game);
+                sub = view == "res" || view == "stretch" ? view : view == "creator" ? "create" : null;
+                if (view == "creator") SampleCreator();
                 brightOpen = expand == "brightness";
                 rounded = win11;
                 Rebuild();
@@ -1527,6 +1534,9 @@ namespace HdrSwitch
                             line(8, 2, 8, 10);
                             g.DrawLines(pen, new[] { P_(4.5f, 6.5f), P_(8, 10), P_(11.5f, 6.5f) });
                             line(2.5f, 13.5f, 13.5f, 13.5f);
+                            break;
+                        case "folder":
+                            g.DrawLines(pen, new[] { P_(1.5f, 12.5f), P_(1.5f, 3.5f), P_(6, 3.5f), P_(7.5f, 5.5f), P_(14.5f, 5.5f), P_(14.5f, 12.5f), P_(1.5f, 12.5f) });
                             break;
                         case "log":      // a page of lines
                             box_(R(2.5f, 1.5f, 11, 13), 1);
@@ -1965,13 +1975,14 @@ namespace HdrSwitch
         /// HdrSwitch.exe --render-flyout out.png [--theme dark|light|hc] [--tab live|games|settings]
         /// [--state running|stretch|grace|recording|paused|idle] [--view games|add|game|res|stretch] [--game exe]
         /// [--search text] [--expand brightness|area] [--notice text] [--no-nvidia] [--scale 1.5] [--focus key]
-        /// [--hover key] [--win10] [--no-update]: draws the flyout over made-up state into a PNG and exits, so its look
+        /// [--hover key] [--win10] [--no-update] [--creator no-cru|ready|exists|confirm|busy|done|failed]: draws the
+        /// flyout over made-up state into a PNG and exits, so its look
         /// can be checked without Windows (under Mono, say). Never part of a normal run. The states: running –
         /// Counter-Strike 2 with HDR, SDR brightness 40, a competitive area and No scaling; stretch – VALORANT
         /// stretched over its area; grace – it closed, back to SDR in 2 s; recording – OBS keeps HDR off; paused; idle.
         /// The library has ten games: with HDR or never, brightness, areas, a stretch, and one area the display lacks.
         /// --view game shows --game's page (cs2 unless given); --expand brightness opens its slider (the area is open
-        /// whenever it is set).
+        /// whenever it is set). --view creator shows the resolution creator for --game, in the state --creator names.
         /// </summary>
         internal static int RenderFlyout(string[] args)
         {
@@ -1996,6 +2007,9 @@ namespace HdrSwitch
                 sample.Modes.Add(new Resolution.Mode { Width = m[0], Height = m[1], Hz = 240 });
             var app = new TrayApp(sample);
             sample.Nvidia = !args.Contains("--no-nvidia");
+            sample.Creator = arg("--creator", "ready");
+            app.cruFolder = sample.Creator == "no-cru" ? null : @"C:\Tools\CRU";
+            if (sample.Creator != "no-cru") sample.Backups.Add("LG 27GR95QE");
             foreach (var g in new[] { "cs2", "cyberpunk2077", "eldenring", "valorant", "r5apex", "bg3", "forzahorizon5", "helldivers2" }) app.games.Add(g);
             foreach (var g in new[] { "hades2", "stardewvalley" }) app.excluded.Add(g);
             app.labels["cs2"] = "Steam: Counter-Strike 2";

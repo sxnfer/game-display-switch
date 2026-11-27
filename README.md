@@ -15,7 +15,7 @@ HDR, resolution and scaling switch when a game starts, and switch back when it c
 | Feature | What it does |
 | --- | --- |
 | **HDR** | On the moment you press Play, back to SDR 3 seconds after you quit. |
-| **Competitive resolution** | A smaller, centred play area per game, with an optional stretched resolution inside it. [More](docs/competitive-resolution.md) |
+| **Competitive resolution** | A smaller, centred play area per game, with an optional stretched resolution inside it. Pick a screen size (24.5″, say) and it creates the matching resolution. [More](docs/competitive-resolution.md) |
 | **NVIDIA scaling** | Switched to No scaling while the game runs, restored after. |
 | **Recording** | Stays in SDR while OBS, Streamlabs or another recording app runs. [More](docs/recording.md) |
 

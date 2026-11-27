@@ -62,7 +62,7 @@ namespace HdrSwitch.Tests
             Run.Equal(Fallback.Kind.Nothing, p.Kind, "@240 in the profile and no 240");
             Run.True(p.Mode == null, "nothing to switch to");
             Run.Equal("missing", p.Reason, "its notice key");
-            Run.Equal("No 2368 × 1332 at 240 Hz for Counter-Strike 2. Create it as a custom resolution in NVIDIA Control Panel.", p.Message, "what to create");
+            Run.Equal("No 2368 × 1332 at 240 Hz for Counter-Strike 2. Create it on the game's page (Competitive area › Create…) or in NVIDIA Control Panel.", p.Message, "what to create");
             Run.True(p.Why.Contains("60,144"), "the log says where it does exist: " + p.Why);
 
             p = Fallback.Choose(AreaSize, null, 60, false, 60, Hz(144, 240), null, "Counter-Strike 2");
@@ -116,7 +116,7 @@ namespace HdrSwitch.Tests
 
             p = Fallback.Choose(AreaSize, StretchSize, 240, true, 240, Hz(60, 144), Hz(60, 144), "VALORANT");
             Run.Equal(Fallback.Kind.Nothing, p.Kind, "@240 in the profile: no lower rate, nothing");
-            Run.Equal("No 1776 × 1332 or 2368 × 1332 at 240 Hz for VALORANT. Create it as a custom resolution in NVIDIA Control Panel.", p.Message, "what to create");
+            Run.Equal("No 1776 × 1332 or 2368 × 1332 at 240 Hz for VALORANT. Create it on the game's page (Competitive area › Create…) or in NVIDIA Control Panel.", p.Message, "what to create");
             Run.Equal("missing", p.Reason, "its notice key");
 
             p = Fallback.Choose(AreaSize, StretchSize, 240, false, 240, Hz(), null, "VALORANT");
