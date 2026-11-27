@@ -230,19 +230,6 @@ namespace HdrSwitch
             catch (Exception) { return "?"; }
         }
 
-        /// <summary>Why TargetGdi picks the display it does (it follows the HDR feature's choice, not the game's screen).</summary>
-        static string TargetWhy()
-        {
-            try
-            {
-                string primary = Screen.PrimaryScreen.DeviceName;
-                var d = Hdr.Primary();
-                if (d == null || d.Gdi.Length == 0) return "primary(no-hdr-display)";
-                return d.Gdi == primary ? "primary(hdr-capable)" : "first-hdr-display(primary=" + primary + ",not-hdr-capable)";
-            }
-            catch (Exception) { return "?"; }
-        }
-
         /// <summary>How the last Resolution.Apply / ApplyStretched went: the steps taken and what Windows answered.</summary>
         static string SetModeTrace(ActiveMode m)
         {

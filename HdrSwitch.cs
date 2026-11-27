@@ -213,13 +213,19 @@ namespace HdrSwitch
 
             sdrTimer.Interval = sdrDelay * 1000;
             sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); SwitchLog.Write("grace-fire", "afterSeconds", sdrDelay); Settle(); };
-            scanTimer.Tick += (s, e) => { Rescan(); FollowGameScreens(); ScanMode(); island.Poll(); if (updateExe != null) FinishUpdate(); };
-            steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); SwitchLog.Write("steam-timeout", "running", running.Count, SwitchLog.Then, "no game appeared within 60 s of Play: settling"); Settle(); };
+            scanTimer.Tick += (s, e) => ScanTick();
+            steamTimeout.Tick += (s, e) =>
+            {
+                steamTimeout.Stop();
+                SwitchLog.Write("steam-timeout", "steamGame", steamGame, "running", running.Count, SwitchLog.Then, "the game Steam was starting didn't appear within 60 s of Play: settling");
+                steamGame = steamLabel = null;
+                Settle();
+            };
             reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); LoadRecorders(); LoadBrightness(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
             stretchVerify.Tick += (s, e) => VerifyStretch();
             modeCheck.Tick += (s, e) => { modeCheck.Stop(); OnDisplayChanged(false); };   // also Resume, unlock, after HDR, a retry: see CheckSoon
             LogSystemEvents(true);
-            SwitchLog.Write("start", "version", Updater.CurrentText, "games", games.Count, "profiles", profiles.Count, "target", TargetGdi(), "why", TargetWhy(),
+            SwitchLog.Write("start", "version", Updater.CurrentText, "games", games.Count, "profiles", profiles.Count, "target", TargetGdi(), "why", "primary(a game's resolution goes on the screen the game was on last time, else here)",
                 ModesOf(TargetGdi()), "hdr", HdrText());
 
             watcher = new FileSystemWatcher(Dir, "*.txt") { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size };
@@ -245,6 +251,7 @@ namespace HdrSwitch
                 RestoreStrayScaling();
             }
             StartGrace();          // HDR taken back from that run, with no game left that wants it: SDR after the usual wait
+            SetScanRate();
             scanTimer.Start();
             UpdateTray();
 
@@ -430,21 +437,29 @@ namespace HdrSwitch
                     (state, timedOut) => ui.Post(_ => Exited((int)state), null), pid, Timeout.Infinite, true);
             }
             running[pid] = r;
-            SwitchLog.Write("scan-detected", "pid", pid, "exe", name, "ageMs", (long)(Proc.AgeSeconds(pid) * 1000), "hdrListed", games.Contains(name), "profiled", profiles.ContainsKey(name),
+            // How long it has been running: its start time, or – for a game Windows won't let us open – the time since the
+            // last look at the process list that didn't have it.
+            double real = Proc.AgeSeconds(pid);
+            long absent = AbsentAt(pid);
+            long age = Follow.AgeMs(real, keepClock.ElapsedMilliseconds, absent);
+            SwitchLog.Write("scan-detected", "pid", pid, "exe", name, "ageMs", Follow.AgeText(age), "ageFrom", Follow.AgeSource(real, absent), "scanEveryMs", scanTimer.Interval, "hdrListed", games.Contains(name), "profiled", profiles.ContainsKey(name),
                 "exitWatched", h != IntPtr.Zero, "running", running.Count, "steamPending", steamTimeout.Enabled, "graceRunning", sdrTimer.Enabled);
 
             sdrTimer.Stop();
             island.End("sdr");
-            steamTimeout.Stop();
-            NoteLaunch(name, false);
+            EndSteamWindow(name);
+            bool late = Follow.Late(age, NoteLaunch(name, false));   // not late if Steam's Play switched before the game started
             // HDR first, the mode after it: switching HDR makes Windows reapply the saved display mode, which would
             // throw away a competitive mode set just before. A mode change leaves HDR alone.
             bool hdr = games.Contains(name) && SwitchOn(name);
-            if (hdr && Proc.AgeSeconds(pid) > 5 && hinted.Add(name))
+            if (hdr && late && hinted.Add(name))
                 Hint("HDR came on after " + DisplayName(name) + " started. If HDR is greyed out in the game, restart it.");
             bool mode = profiles.ContainsKey(name) && ApplyResolution(name);
-            if (mode && Proc.AgeSeconds(pid) > 5 && resHinted.Add(name))
+            if (mode && late && resHinted.Add(name))
                 Hint(ResHint(name));
+            if ((hdr || mode) && late)
+                SwitchLog.Write("late", "exe", name, "ageMs", Follow.AgeText(age), "hdrSwitched", hdr, "modeSwitched", mode, SwitchLog.Then,
+                    "the switch came after the game had started (more than " + Follow.LateMs + " ms, or for an unknown time): 'restart the game' is said once per game");
             if (hdr || mode) AnnounceGame(name, hdr);
             if (hdr && res != null) CheckSoon(ModeKeeper.How.HdrVerify, 1500);   // some drivers reset the mode a moment after an HDR switch
             SwitchLog.Write("tracked", "pid", pid, "exe", name, "hdrSwitched", hdr, "modeSwitched", mode, "ours", OursText(res), "hdr", HdrText());
@@ -504,9 +519,10 @@ namespace HdrSwitch
         }
 
         /// <summary>The screen Display Switch switches: the island's news is about that one.</summary>
-        static Screen IslandScreen()
+        Screen IslandScreen()
         {
-            string gdi = TargetGdi();
+            var hdr = res != null || owned.Count > 0 ? null : Hdr.Primary();
+            string gdi = res != null ? res.Gdi : owned.Count > 0 ? owned[0].Gdi : hdr != null && hdr.Gdi.Length > 0 ? hdr.Gdi : TargetGdi();
             return Screen.AllScreens.FirstOrDefault(s => s.DeviceName == gdi) ?? Screen.PrimaryScreen;
         }
 
@@ -535,6 +551,8 @@ namespace HdrSwitch
             if (hdr && res != null) CheckSoon(ModeKeeper.How.HdrVerify, 1500);
             steamTimeout.Stop();
             steamTimeout.Start();   // back to normal if the game doesn't show up within a minute
+            steamGame = name;       // only this game ends the wait (see EndSteamWindow)
+            steamLabel = label;
             SwitchLog.Write("steam-prelaunch", "exe", name, "hdrSwitched", hdr, "modeSwitched", mode, "ours", OursText(res), SwitchLog.Then, "waiting up to 60 s for the game's process");
             UpdateTray();
         }
@@ -589,27 +607,50 @@ namespace HdrSwitch
         }
 
         /// <summary>
-        /// Once a second: spots games as soon as their process starts – while they are still loading, long before
-        /// their window shows – so HDR is on by the time the game asks Windows about it. A process snapshot holds
-        /// only names and ids, so this costs well under a millisecond.
+        /// Once a second, or four times while no game runs (Follow.ScanInterval): spots games as soon as their process
+        /// starts – while they are still loading, long before their window shows – so HDR is on by the time the game
+        /// asks Windows about it. A process snapshot holds only names and ids, and the lists it fills are kept between
+        /// looks, so a look is cheap.
         /// </summary>
         void Rescan()
         {
             bool unwaitable = running.Values.Any(r => r.Wait == null);
-            if (games.Count == 0 && profiles.Count == 0 && !unwaitable && !sdrWhileRecording) return;
-
-            var alive = new HashSet<int>();
-            var snapshot = Proc.Snapshot();
-            // The recorder first, so a game found in the same scan already sees it.
-            SetRecorder(sdrWhileRecording ? snapshot.Select(p => p.Value).FirstOrDefault(recorders.ContainsKey) : null);
-            foreach (var p in snapshot)
+            if (inScan) return;   // a look is in progress further up the stack: the next tick looks again
+            if (games.Count == 0 && profiles.Count == 0 && !unwaitable && !sdrWhileRecording)
             {
-                alive.Add(p.Key);
-                if (Followed(p.Value) && !running.ContainsKey(p.Key)) Track(p.Key, p.Value);
+                absentAt.Clear();   // not looking: whatever is found when it starts again was there for an unknown time
+                lastScanAt = -1;
+                return;
             }
-            if (unwaitable)
-                foreach (int pid in running.Where(kv => kv.Value.Wait == null && !alive.Contains(kv.Key)).Select(kv => kv.Key).ToList())
-                    Exited(pid);
+            inScan = true;
+            try
+            {
+                long now = keepClock.ElapsedMilliseconds;
+                var alive = scanAlive;
+                var snapshot = scanList;
+                alive.Clear();
+                Proc.Snapshot(snapshot);
+                // The recorder first, so a game found in the same scan already sees it.
+                SetRecorder(sdrWhileRecording ? snapshot.Select(p => p.Value).FirstOrDefault(recorders.ContainsKey) : null);
+                for (int i = 0; i < snapshot.Count; i++)
+                {
+                    var p = snapshot[i];
+                    alive.Add(p.Key);
+                    if (!absentAt.ContainsKey(p.Key)) absentAt[p.Key] = lastScanAt;   // new since the last look (-1: this is the first)
+                    if (Followed(p.Value) && !running.ContainsKey(p.Key)) Track(p.Key, p.Value);
+                }
+                if (absentAt.Count != alive.Count)   // some ended: forgotten, so a process id used again counts as new
+                {
+                    scanDead.Clear();
+                    foreach (int pid in absentAt.Keys) if (!alive.Contains(pid)) scanDead.Add(pid);
+                    foreach (int pid in scanDead) absentAt.Remove(pid);
+                }
+                lastScanAt = now;
+                if (unwaitable)
+                    foreach (int pid in running.Where(kv => kv.Value.Wait == null && !alive.Contains(kv.Key)).Select(kv => kv.Key).ToList())
+                        Exited(pid);
+            }
+            finally { inScan = false; }
         }
 
         /// <summary>Stops following running games that were taken off both lists.</summary>
@@ -670,15 +711,18 @@ namespace HdrSwitch
         }
 
         /// <summary>Every display this app switched to HDR goes back to SDR.</summary>
-        void AllToSdr()
+        void AllToSdr() { AllToSdr(false); }
+
+        /// <summary>
+        /// A display Windows refuses to switch back stays this app's (HDR is still on there, and still ours to switch off):
+        /// the scan tries again (RetrySdr), a few times. fromScan: this is such a retry.
+        /// </summary>
+        void AllToSdr(bool fromScan)
         {
-            foreach (var d in owned)
-            {
-                bool ok = Hdr.Set(d, false);
-                SwitchLog.Write("hdr-off", "display", d.Gdi, SwitchLog.Then, ok ? "off" : "failed (Windows refused)");
-            }
-            owned.Clear();
-            SaveOwned();
+            int before = owned.Count;
+            foreach (var d in owned.ToList())
+                if (ToSdr(d, "nothing needs HDR on it any more", fromScan)) owned.RemoveAll(o => o.Key == d.Key);
+            if (owned.Count != before || !fromScan) SaveOwned();
         }
 
         void SaveOwned()
@@ -759,34 +803,71 @@ namespace HdrSwitch
 
         void FollowGameScreens()
         {
-            if (paused || recorder != null) return;
-            var hdrGames = running.Where(kv => games.Contains(kv.Value.Name)).ToList();
-            if (hdrGames.Count == 0) return;
+            windowOf.Clear();
+            if (running.Count == 0)
+            {
+                FollowModeScreen();   // nothing to follow: forgets a move it was waiting on
+                return;
+            }
+            // Where every followed game's window is: remembered for its next start, for HDR and for its resolution alike.
+            var hdrGames = new List<string>();   // the HDR games, and the screen each one's window is on (null: no window yet)
             var now = new List<string>();
-            foreach (var kv in hdrGames)
+            foreach (var kv in running)
             {
                 string gdi = Proc.WindowScreen(kv.Key);
-                now.Add(gdi);
-                if (gdi != null) RememberScreen(kv.Value.Name, gdi);
+                string name = kv.Value.Name;
+                if (gdi != null) RememberScreen(name, gdi);
+                if (games.Contains(name))
+                {
+                    hdrGames.Add(name);
+                    now.Add(gdi);
+                }
+                string seen;
+                if (profiles.ContainsKey(name) && (!windowOf.TryGetValue(name, out seen) || seen == null)) windowOf[name] = gdi;
             }
+            if (!paused && recorder == null && hdrGames.Count > 0) FollowHdrScreens(hdrGames, now);
+            FollowModeScreen();
+        }
+
+        void FollowHdrScreens(List<string> hdrGames, List<string> now)
+        {
             List<Hdr.Display> on, off;
             PlanScreens(now, Hdr.All(), new HashSet<string>(owned.Select(o => o.Key)), out on, out off);
             if (on.Count == 0 && off.Count == 0) return;
             bool ours = InOurMode();
+            bool changed = false;
             foreach (var d in on)
+            {
+                // Windows may refuse: tried a few times for this game on this screen, then said once and left alone until
+                // the game is next started.
+                int at = now.IndexOf(d.Gdi);
+                string game = at < 0 ? "" : hdrGames[at];
+                string key = "on|" + game + "|" + d.Key;
+                if (!tries.May(key)) continue;
                 if (Hdr.Set(d, true))
                 {
-                    SwitchLog.Periodic("screen-on:" + d.Key, "hdr-on", "display", d.Gdi, "why", "a game's window is on this screen", "inOurMode", ours, SwitchLog.Then, "on");
+                    tries.Clear(key);
+                    SwitchLog.Write("hdr-on", "game", game, "display", d.Gdi, "why", "the game's window is on this screen", "inOurMode", ours, SwitchLog.Then, "on");
                     Own(d);
+                    changed = true;
+                    continue;
                 }
-                else SwitchLog.Periodic("screen-on:" + d.Key, "hdr-on", "display", d.Gdi, "why", "a game's window is on this screen", SwitchLog.Then, "failed (Windows refused; tried again every second)");
+                int n = tries.Fail(key);
+                bool again = tries.May(key);
+                SwitchLog.Write("hdr-on", "game", game, "display", d.Gdi, "why", "the game's window is on this screen", "try", n + "/" + Follow.HdrTries, SwitchLog.Then,
+                    again ? "FAILED (Windows refused): tried again in a second" : "FAILED (Windows refused " + Follow.HdrTries + " times): not tried again for this game on this screen until the game is next started");
+                if (!again && game.Length > 0)
+                    Problem(game, "hdr-screen", "Couldn't switch HDR on for " + DisplayName(game) + " on the screen it is on: Windows refused. It is tried again when the game is next started.");
+            }
             foreach (var d in off)
             {
+                if (!tries.May("off|" + d.Key)) continue;   // refused a few times already: left for the next settle
                 if (d.Is(brightKey)) RestoreBrightness();
-                bool ok = Hdr.Set(d, false);
-                SwitchLog.Periodic("screen-off:" + d.Key, "hdr-off", "display", d.Gdi, "why", "no running game is on this screen", SwitchLog.Then, ok ? "off" : "failed (Windows refused)");
+                if (!ToSdr(d, "no running game is on this screen", true)) continue;   // refused: HDR is still on, and still ours
                 Disown(d);
+                changed = true;
             }
+            if (!changed) return;
             if (ours) KeepMode();
             UpdateTray();
         }
@@ -894,6 +975,7 @@ namespace HdrSwitch
             {
                 sdrTimer.Stop();
                 steamTimeout.Stop();
+                steamGame = steamLabel = null;
                 island.End("sdr");
                 RevertResolution();
                 RestoreStrayScaling();
@@ -1024,11 +1106,13 @@ namespace HdrSwitch
 
         // ---- competitive resolution ----
 
-        /// <summary>The display the HDR feature uses; the main display if none can do HDR.</summary>
+        /// <summary>
+        /// The main display: where a competitive resolution goes for a game with no remembered screen. For a game, see
+        /// TargetGdiFor (Follow.cs): the screen it was on last time comes first.
+        /// </summary>
         static string TargetGdi()
         {
-            var d = Hdr.Primary();
-            return d != null && d.Gdi.Length > 0 ? d.Gdi : Screen.PrimaryScreen.DeviceName;
+            return Screen.PrimaryScreen.DeviceName;
         }
 
         /// <summary>"2368 × 1332", or "2368 × 1332 @ 240 Hz" when the profile names a rate.</summary>
@@ -1087,11 +1171,13 @@ namespace HdrSwitch
                 var holder = res;
                 return CheckMode(ModeKeeper.How.GameStart) == ModeKeeper.Verdict.Reapply && res == holder && InOurMode();
             }
-            string gdi = TargetGdi();
+            string targetWhy;
+            string gdi = TargetGdiFor(name, out targetWhy);   // the game's screen, else the main one
+            modeTried[name] = gdi;
             var now = Resolution.Current(gdi);
             if (now == null)
             {
-                SwitchLog.Write("apply", "game", name, "want", p, "display", gdi, "why", TargetWhy(), SwitchLog.Then, "skipped (Windows gave no current mode for this display)");
+                SwitchLog.Write("apply", "game", name, "want", p, "display", gdi, "why", targetWhy, SwitchLog.Then, "skipped (Windows gave no current mode for this display)");
                 return false;
             }
             notices.Clear(name);   // a new switch: what was wrong last time is kept only if it comes up again
@@ -1113,7 +1199,7 @@ namespace HdrSwitch
             bool stretch = plan.Area != null;
             if (plan.Mode != null) area = plan.Area ?? plan.Mode;
             // What every "apply" line starts with: the game, the display and why it was picked, what is wanted, what is there.
-            var asked = SwitchLog.Pairs("game", name, "display", gdi, "why", TargetWhy(), "want", wanted, "area", own != null ? new Resolution.Mode { Width = p.Width, Height = p.Height, Hz = wantHz } : null, "profileHz", p.Hz > 0 ? p.Hz + "" : "current",
+            var asked = SwitchLog.Pairs("game", name, "display", gdi, "why", targetWhy, "want", wanted, "area", own != null ? new Resolution.Mode { Width = p.Width, Height = p.Height, Hz = wantHz } : null, "profileHz", p.Hz > 0 ? p.Hz + "" : "current",
                 "current", now, "saved", Resolution.Saved(gdi), "plan", plan.Why);
             if (leftover != null && (leftover.Gdi != gdi || !leftover.Mode.Same(now)))   // gone since: nothing of ours is left
             {
@@ -3166,30 +3252,55 @@ namespace HdrSwitch
             return Native.OpenProcess(Synchronize, false, pid);
         }
 
+        /// <summary>
+        /// How long the process has been running, in seconds – or -1 if Windows won't say: a game that runs elevated or
+        /// behind anti-cheat can't be opened. (0 would read as "just started".)
+        /// </summary>
         public static double AgeSeconds(int pid)
         {
-            try { using (var p = Process.GetProcessById(pid)) return (DateTime.Now - p.StartTime).TotalSeconds; }
-            catch { return 0; }
+            try { using (var p = Process.GetProcessById(pid)) return Math.Max(0, (DateTime.Now - p.StartTime).TotalSeconds); }
+            catch { return -1; }
         }
 
         /// <summary>All running processes as (pid, normalized name) – a light snapshot, no Process objects.</summary>
         public static List<KeyValuePair<int, string>> Snapshot()
         {
             var list = new List<KeyValuePair<int, string>>(400);
+            Snapshot(list);
+            return list;
+        }
+
+        static readonly Dictionary<string, string> normalized = new Dictionary<string, string>(StringComparer.Ordinal);   // "Game.exe" → "game"
+        static readonly int entrySize = Marshal.SizeOf(typeof(ProcessEntry));
+
+        /// <summary>The same, into a list the caller keeps: the scan runs up to four times a second (UI thread only).</summary>
+        public static void Snapshot(List<KeyValuePair<int, string>> list)
+        {
+            list.Clear();
             IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if (snap == (IntPtr)(-1)) return list;
+            if (snap == (IntPtr)(-1)) return;
             try
             {
-                var e = new ProcessEntry { Size = (uint)Marshal.SizeOf(typeof(ProcessEntry)) };
+                var e = new ProcessEntry { Size = (uint)entrySize };
                 for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e))
-                {
-                    string name = e.ExeFile;
-                    if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 4);
-                    list.Add(new KeyValuePair<int, string>((int)e.ProcessId, name.ToLowerInvariant()));
-                }
+                    list.Add(new KeyValuePair<int, string>((int)e.ProcessId, Lowered(e.ExeFile)));
             }
             finally { Native.CloseHandle(snap); }
-            return list;
+        }
+
+        /// <summary>"Game.exe" → "game". Remembered, so a look at the process list doesn't cut and lower-case every name again.</summary>
+        static string Lowered(string exe)
+        {
+            string name;
+            lock (normalized)
+            {
+                if (normalized.TryGetValue(exe, out name)) return name;
+                name = exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? exe.Substring(0, exe.Length - 4) : exe;
+                name = name.ToLowerInvariant();
+                if (normalized.Count > 4096) normalized.Clear();
+                normalized[exe] = name;
+                return name;
+            }
         }
 
         const uint TH32CS_SNAPPROCESS = 2;

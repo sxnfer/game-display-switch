@@ -4,10 +4,10 @@
 
 
 - **Steam games**: Steam marks a game as running in the registry the moment you press Play. Display Switch is told about that change by Windows, so HDR is on before the game even starts. That matters for games such as Dying Light: The Beast, which only offer their HDR option if Windows HDR is already on when they start.
-- **Other games**: once a second it takes a lightweight list of running programs and compares it with your game list, catching games while they are still loading.
+- **Other games**: it takes a lightweight list of running programs and compares it with your game list, catching games while they are still loading. While no game runs it looks four times a second, so a game is found within a quarter of a second of starting; once a game runs, once a second.
 - When the last game closes, it waits 3 seconds and switches back to SDR.
 - It only switches back HDR **it** turned on. HDR that you, a game or another tool turned on is left alone.
-- Idle cost: about 0.2% of one CPU core and ~20 MB of memory.
+- Idle cost: well under 1% of one CPU core and ~20 MB of memory. (About 0.2% was measured when it looked once a second; looking four times a second while no game runs costs a little more, and stops as soon as a game runs.)
 
 Your game list lives in `%AppData%\HdrSwitch\games.txt` (one exe per line; a `-` in front means "never").
 
