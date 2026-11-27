@@ -234,8 +234,10 @@ namespace HdrSwitch
                 case ModeKeeper.Verdict.GiveUp:
                     r.GaveUp = true;
                     if (resFailed.Add(r.Game + "/reset"))
-                        Hint("Windows keeps resetting the resolution, so " + r.Text + " for " + DisplayName(r.Game) + " isn't set again for now. If the game is in exclusive fullscreen at "
-                            + (s.Current != null ? s.Current.Text : "another resolution") + ", set it to " + r.Mode.Text + " or to borderless.");
+                        Hint("Windows keeps resetting the resolution, so " + r.Text + " for " + DisplayName(r.Game) + " isn't set again for now. "
+                            + (!r.Mode.Same(s.Current) ? "If the game is in exclusive fullscreen at " + s.Current.Text + ", set it to " + r.Mode.Text + " or to borderless."
+                                : r.Area != null ? "Switch the game to borderless and restart it."
+                                : "In NVIDIA Control Panel › Adjust desktop size and position, untick Override the scaling mode."));
                     break;
             }
             return v;
