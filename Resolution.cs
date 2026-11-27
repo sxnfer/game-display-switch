@@ -72,7 +72,7 @@ namespace HdrSwitch
             return Modes(gdi, hz).Any(m => m.Width == w && m.Height == h);
         }
 
-        /// <summary>The refresh rates at which the display offers this size, lowest first. For the switch log only.</summary>
+        /// <summary>The refresh rates at which the display offers this size, lowest first.</summary>
         public static List<int> Rates(string gdi, int w, int h)
         {
             var rates = new SortedSet<int>();
@@ -145,10 +145,10 @@ namespace HdrSwitch
             // In one step where it can be: the size and the region together. Another refresh rate, or a desktop layout
             // Windows won't take as supplied (more displays), needs the mode set first.
             LastStretch = lastAim = "";
-            if (now.Hz == hz && Aim(gdi, w, h, areaW, areaH)) { LastStretch = "one-step(" + lastAim + ")"; return true; }
+            if (now.Hz == hz && Aim(gdi, w, h, hz, areaW, areaH)) { LastStretch = "one-step(" + lastAim + ")"; return true; }
             string first = now.Hz == hz ? "one-step(" + lastAim + ")," : "one-step(skipped:hz-differs),";
             if (!Apply(gdi, w, h, hz)) { LastStretch = first + "set-mode(cds=" + LastCds + ")"; return false; }
-            if (Aim(gdi, w, h, areaW, areaH)) { LastStretch = first + "set-mode(ok),aim(" + lastAim + ")"; return true; }
+            if (Aim(gdi, w, h, hz, areaW, areaH)) { LastStretch = first + "set-mode(ok),aim(" + lastAim + ")"; return true; }
             string aim = lastAim;
             Restore(gdi);
             LastStretch = first + "set-mode(ok),aim(" + aim + "),restored";
@@ -170,15 +170,55 @@ namespace HdrSwitch
 
         static string lastAim;   // how the last Aim went, for LastStretch
 
-        /// <summary>Sets the desktop size and aims it at the centred area: the path's desktop image region. Not saved.</summary>
-        static bool Aim(string gdi, int w, int h, int areaW, int areaH)
+        /// <summary>
+        /// Whether the area is to be measured on the panel's native (preferred) mode instead of the signal it gets right
+        /// now: when the two differ in size – the monitor is doing the scaling at this moment, so the current signal says
+        /// nothing about the panel – and the native mode is known at the rate wanted (one Hz off counts), so that its
+        /// timing can be asked for as it is. Otherwise the current signal is kept, as before.
+        /// </summary>
+        internal static bool AimAtNative(int signalW, int signalH, int nativeW, int nativeH, int nativeHz, int hz)
+        {
+            if (nativeW <= 0 || nativeH <= 0) return false;
+            if (nativeW == signalW && nativeH == signalH) return false;
+            return Math.Abs(nativeHz - hz) <= 1;
+        }
+
+        /// <summary>
+        /// Sets the desktop size and aims it at the centred area: the path's desktop image region. Not saved. The area is
+        /// centred on the panel's native mode: the current signal if that is native, else the monitor's preferred mode,
+        /// which the path is then switched to (AimAtNative).
+        /// </summary>
+        static bool Aim(string gdi, int w, int h, int hz, int areaW, int areaH)
         {
             using (var c = Query(gdi))
             {
                 lastAim = "no-display-config";
                 if (c == null) return false;
                 int tw = Marshal.ReadInt32(c.Target, 40), th = Marshal.ReadInt32(c.Target, 44);
-                lastAim = "does-not-fit:signal=" + tw + "x" + th;
+                string signal = "signal=" + tw + "x" + th;
+                IntPtr pref = Marshal.AllocHGlobal(PreferredSize);
+                try
+                {
+                    int nw, nh, nhz;
+                    if (Preferred(c, pref, out nw, out nh, out nhz) && (nw != tw || nh != th))
+                    {
+                        if (AimAtNative(tw, th, nw, nh, nhz, hz))
+                        {
+                            // The preferred mode's video signal (48 bytes) becomes the path's target mode.
+                            var timing = new byte[48];
+                            Marshal.Copy((IntPtr)((long)pref + 32), timing, 0, 48);
+                            Marshal.Copy(timing, 0, (IntPtr)((long)c.Target + 16), 48);
+                            c.Paths[c.Path].Target.RefreshNum = (uint)Marshal.ReadInt32(pref, 48);
+                            c.Paths[c.Path].Target.RefreshDen = (uint)Marshal.ReadInt32(pref, 52);
+                            c.Paths[c.Path].Target.ScanLineOrdering = Marshal.ReadInt32(pref, 76);
+                            signal = "signal=" + nw + "x" + nh + "(native@" + nhz + ",was=" + tw + "x" + th + ")";
+                            tw = nw; th = nh;
+                        }
+                        else signal += "(not-native:" + nw + "x" + nh + "@" + nhz + ",kept)";
+                    }
+                }
+                finally { Marshal.FreeHGlobal(pref); }
+                lastAim = "does-not-fit:" + signal;
                 if (w > areaW || h > areaH || areaW > tw || areaH > th) return false;   // only ever enlarging – see the top of this file
                 int x = (tw - areaW) / 2, y = (th - areaH) / 2;
                 Marshal.WriteInt32(c.Source, 16, w);
@@ -189,9 +229,31 @@ namespace HdrSwitch
                 Marshal.Copy(info, 0, (IntPtr)((long)c.Desktop + 16), info.Length);
                 c.Paths[c.Path].Target.Scaling = 1;   // identity: the path's surface is the signal itself, the region does the rest
                 int r = SetDisplayConfig(c.PathCount, c.Paths, c.ModeCount, c.Modes, SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE);
-                lastAim = "sdc=" + r + ":signal=" + tw + "x" + th;
+                lastAim = "sdc=" + r + ":" + signal;
                 return r == 0;
             }
+        }
+
+        // DISPLAYCONFIG_TARGET_PREFERRED_MODE: header (20 bytes), width, height at 20 and 24, then – aligned to 8 – the
+        // DISPLAYCONFIG_TARGET_MODE at 32: a DISPLAYCONFIG_VIDEO_SIGNAL_INFO of 48 bytes (vSyncFreq at +16, scan line
+        // ordering at +44).
+        const int PreferredSize = 80;
+
+        /// <summary>The monitor's preferred mode – its native one – into buf: its size and rate. False if Windows gives none.</summary>
+        static bool Preferred(Config c, IntPtr buf, out int w, out int h, out int hz)
+        {
+            w = h = hz = 0;
+            for (int i = 0; i < PreferredSize; i++) Marshal.WriteByte(buf, i, 0);
+            Marshal.WriteInt32(buf, 0, 3);   // DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE
+            Marshal.WriteInt32(buf, 4, PreferredSize);
+            Marshal.StructureToPtr(c.Paths[c.Path].Target.Adapter, (IntPtr)((long)buf + 8), false);
+            Marshal.WriteInt32(buf, 16, (int)c.Paths[c.Path].Target.Id);
+            if (DisplayConfigGetDeviceInfo(buf) != 0) return false;
+            w = Marshal.ReadInt32(buf, 20);
+            h = Marshal.ReadInt32(buf, 24);
+            uint num = (uint)Marshal.ReadInt32(buf, 48), den = (uint)Marshal.ReadInt32(buf, 52);
+            hz = den == 0 ? 0 : (int)Math.Round((double)num / den);
+            return w > 0 && h > 0;
         }
 
         /// <summary>The active display configuration with virtual modes, and this display's path and mode entries in it.</summary>
@@ -375,5 +437,6 @@ namespace HdrSwitch
         [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint numPaths, [Out] PathInfo[] paths, ref uint numModes, IntPtr modes, IntPtr topology);
         [DllImport("user32.dll")] static extern int SetDisplayConfig(uint numPaths, [In] PathInfo[] paths, uint numModes, IntPtr modes, uint flags);
         [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref SourceName info);
+        [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(IntPtr info);
     }
 }

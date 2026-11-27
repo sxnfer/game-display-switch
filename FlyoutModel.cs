@@ -352,10 +352,12 @@ namespace HdrSwitch
         /// <summary>
         /// The setup hint a game's page shows: the latest notification when it is about this game (name), else what has
         /// to be created first – the area or the stretched resolution, when the display doesn't offer it at the rate
-        /// (hz) it is switched at. Null: nothing to set up.
+        /// (hz) it is switched at. Before both, problem: the latest notice about this game's own switch (a missing
+        /// resolution, a fallback, a refusal), which stays until the game is next switched. Null: nothing to set up.
         /// </summary>
-        internal static string SetupHint(GameInfo g, string notice, bool areaExists, bool stretchExists, int hz)
+        internal static string SetupHint(GameInfo g, string notice, bool areaExists, bool stretchExists, int hz, string problem = null)
         {
+            if (!string.IsNullOrEmpty(problem)) return problem;
             if (notice != null && g.Name != null && notice.IndexOf(g.Name, StringComparison.Ordinal) >= 0) return notice;
             Resolution.Mode missing = g.Area != null && !areaExists ? g.Area : g.Area != null && g.Stretch != null && !stretchExists ? g.Stretch : null;
             if (missing == null) return null;

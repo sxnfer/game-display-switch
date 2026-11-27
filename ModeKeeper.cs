@@ -47,7 +47,8 @@ namespace HdrSwitch
             OwnSwitch,       // right after this app switched HDR, which resets the mode
             HdrVerify,       // a moment after an HDR switch: some drivers reset the mode late
             GameStart,       // a game with a resolution started (or Steam is starting one) while a mode is held
-            Retry            // a re-apply that Windows refused, tried once more
+            Retry,           // a re-apply that Windows refused, tried once more
+            StretchVerify    // a stretched mode that didn't show as stretched 500 ms after it was set (Fallback.cs)
         }
 
         /// <summary>Re-applies allowed per game in any 60 seconds.</summary>
@@ -182,7 +183,7 @@ namespace HdrSwitch
                 Stretched = r.Area != null && Resolution.Stretched(r.Gdi, r.Area.Width, r.Area.Height), WasCentred = r.Centred,
                 // A game that is just starting counts (Steam's Play comes before its process), and so does our own HDR
                 // switch, which is only followed up if the desktop was in our mode just before it.
-                GameRunning = ProfiledRunning() || how == ModeKeeper.How.GameStart || how == ModeKeeper.How.OwnSwitch,
+                GameRunning = ProfiledRunning() || how == ModeKeeper.How.GameStart || how == ModeKeeper.How.OwnSwitch || how == ModeKeeper.How.StretchVerify,
                 Paused = paused, Retries = ModeKeeper.Recent(r.Reapplied, now), GaveUp = r.GaveUp,
                 SinceChangeMs = how == ModeKeeper.How.Scan && lastChange >= 0 ? (int)Math.Min(int.MaxValue, now - lastChange) : -1, How = how
             };
@@ -216,8 +217,7 @@ namespace HdrSwitch
                     Reapply(r, how, s);
                     break;
                 case ModeKeeper.Verdict.GameOwnMode:
-                    if (resFailed.Add(r.Game + "/own"))
-                        Hint(r.Area != null
+                    Problem(r.Game, "own", r.Area != null
                             ? DisplayName(r.Game) + " set its own display mode, so " + r.Mode.Text + " is no longer stretched. Switch the game to borderless and restart it."
                             : DisplayName(r.Game) + " set its own display mode (" + s.Current.Text + "), so the screen isn't at " + r.Mode.Text + " while it shows. Display Switch leaves the game's mode alone: set the game to "
                                 + r.Mode.Text + " or to borderless for the whole area.");
@@ -228,13 +228,11 @@ namespace HdrSwitch
                     SwitchLog.Write("mode-let-go", "game", r.Game, "display", r.Gdi, "ours", OursText(r), "saved", s.Saved, "was", s.Back, SwitchLog.Then,
                         "no longer ours: nothing more is switched or put back for it but the NVIDIA scaling");
                     RestoreScaling(r.Gdi, r.ScalingBack);   // the mode isn't ours any more, but the scaling setting still is
-                    if (resFailed.Add(r.Game + "/user"))
-                        Hint("The display settings were changed while " + DisplayName(r.Game) + " runs, so Display Switch has let go of " + r.Text + ". Restart the game to switch again.");
+                    Problem(r.Game, "user", "The display settings were changed while " + DisplayName(r.Game) + " runs, so Display Switch has let go of " + r.Text + ". Restart the game to switch again.");
                     break;
                 case ModeKeeper.Verdict.GiveUp:
                     r.GaveUp = true;
-                    if (resFailed.Add(r.Game + "/reset"))
-                        Hint("Windows keeps resetting the resolution, so " + r.Text + " for " + DisplayName(r.Game) + " isn't set again for now. "
+                    Problem(r.Game, "reset", "Windows keeps resetting the resolution, so " + r.Text + " for " + DisplayName(r.Game) + " isn't set again for now. "
                             + (!r.Mode.Same(s.Current) ? "If the game is in exclusive fullscreen at " + s.Current.Text + ", set it to " + r.Mode.Text + " or to borderless."
                                 : r.Area != null ? "Switch the game to borderless and restart it."
                                 : "In NVIDIA Control Panel › Adjust desktop size and position, untick Override the scaling mode."));
@@ -250,7 +248,7 @@ namespace HdrSwitch
         bool Reapply(ActiveMode r, ModeKeeper.How how, ModeKeeper.Seen s)
         {
             if (how != ModeKeeper.How.OwnSwitch) r.Reapplied.Add(keepClock.ElapsedMilliseconds);   // our own HDR switch always resets the mode: no fight
-            string scaling = r.Area == null ? RetakeScaling(r) : "-";
+            string scaling = RetakeScaling(r);
             bool ok = SetMode(r);
             string trace = SetModeTrace(r);
             if (ok && KeepHdr())   // the mode change took HDR down, and putting HDR back resets the mode
@@ -270,6 +268,14 @@ namespace HdrSwitch
         /// <summary>NVIDIA's No scaling, if this app had set it and something reset it: set again before the mode, as at the start.</summary>
         string RetakeScaling(ActiveMode r)
         {
+            if (r.ScalingBack < 0 && r.ScalingPending)
+            {
+                // It couldn't be taken when the mode was first set (the desktop wasn't at its saved mode): now, maybe.
+                r.ScalingBack = TakeScaling(r.Gdi);
+                r.ScalingPending = lastTake == Fallback.Take.NotAtSaved;
+                if (res == r && r.ScalingBack >= 0) SaveState();
+                return "pending-take:" + lastTake;
+            }
             if (r.ScalingBack < 0) return "not-ours";
             int now = Nvidia.Scaling(r.Gdi);
             if (now < 0) return SwitchLog.NvidiaName(now);
@@ -277,7 +283,9 @@ namespace HdrSwitch
             // As in TakeScaling: only at the saved mode, because the driver saves the current mode with the setting.
             if (!Resolution.AtSaved(r.Gdi)) return "reset-to:" + SwitchLog.NvidiaName(now) + ",not-retaken(not-at-saved-mode)";
             bool set = Nvidia.SetScaling(r.Gdi, Nvidia.NoScaling);
-            return "reset-to:" + SwitchLog.NvidiaName(now) + (set ? ",retaken:" : ",retake-FAILED:") + SwitchLog.NvidiaName(Nvidia.Scaling(r.Gdi));
+            int after = Nvidia.Scaling(r.Gdi);
+            var took = Fallback.Took(set, after);
+            return "reset-to:" + SwitchLog.NvidiaName(now) + (Fallback.Changed(took) ? ",retaken:" : took == Fallback.Take.NotStuck ? ",retake-DID-NOT-STICK:" : ",retake-FAILED:") + SwitchLog.NvidiaName(after);
         }
 
         /// <summary>
@@ -287,7 +295,7 @@ namespace HdrSwitch
         /// </summary>
         void ScanMode()
         {
-            if (res == null || paused || modeCheck.Enabled || !ProfiledRunning()) return;
+            if (res == null || paused || modeCheck.Enabled || stretchVerify.Enabled || !ProfiledRunning()) return;
             long now = keepClock.ElapsedMilliseconds;
             if (lastCheck >= 0 && now - lastCheck < 1000) return;   // decided a moment ago
             if (InOurMode())
