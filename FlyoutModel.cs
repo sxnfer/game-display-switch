@@ -7,6 +7,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 
 namespace HdrSwitch
 {
@@ -376,6 +377,63 @@ namespace HdrSwitch
         }
 
         /// <summary>"4:3", "16:10", "16:9" … or "1.78:1" for a shape without a short name.</summary>
+        /// <summary>A row of a page's size list: the size, at the rate it is switched at – or, with Only set, a size the display has at other rates only.</summary>
+        internal sealed class SizeRow
+        {
+            public Resolution.Mode Mode;   // Hz: the rate the display has it at (the wanted one, or one Hz off it); 0 with Only
+            public string Only;            // "only at 60 Hz", "only at 60, 120 Hz" – null: it can be picked
+        }
+
+        /// <summary>
+        /// The sizes of a game's list, from every mode the display offers (each size at each of its rates), for the
+        /// rate hz the game is switched at. One row per size, and a size counts as there at hz if the display has it at
+        /// hz or one Hz above or below it – Windows reports the same rate as 239 on one size and 240 on another
+        /// (Fallback.Near, which is how the switch looks for it too). Sizes the display has at other rates only come
+        /// last, each saying at which, and can't be picked.
+        ///  - The area's list (area null): every size smaller than the panel (full) and not beyond it either way, the
+        ///    panel's own shape first, then the largest first.
+        ///  - The stretch's list (area set): the sizes that fit inside the area, the largest first.
+        /// </summary>
+        internal static List<SizeRow> SizeRows(IEnumerable<Resolution.Mode> all, int hz, Resolution.Mode full, Resolution.Mode area)
+        {
+            var rows = new List<SizeRow>();
+            if (all == null || (area == null && full == null)) return rows;
+            var sizes = new List<Resolution.Mode>();
+            var rates = new Dictionary<string, SortedSet<int>>();
+            foreach (var m in all)
+            {
+                if (m == null || m.Width <= 0 || m.Height <= 0) continue;
+                if (area != null ? !Fits(m, area) : !(m.Width <= full.Width && m.Height <= full.Height && (m.Width < full.Width || m.Height < full.Height))) continue;
+                string key = m.Width + "x" + m.Height;
+                SortedSet<int> of;
+                if (!rates.TryGetValue(key, out of))
+                {
+                    rates[key] = of = new SortedSet<int>();
+                    sizes.Add(m);
+                }
+                if (m.Hz > 0) of.Add(m.Hz);
+            }
+            sizes.Sort((a, b) =>
+            {
+                int byShape = area != null ? 0 : (SameAspect(a, full) ? 0 : 1).CompareTo(SameAspect(b, full) ? 0 : 1);
+                if (byShape != 0) return byShape;
+                int byPixels = ((long)b.Width * b.Height).CompareTo((long)a.Width * a.Height);
+                return byPixels != 0 ? byPixels : b.Width.CompareTo(a.Width);
+            });
+            var other = new List<SizeRow>();
+            foreach (var m in sizes)
+            {
+                var of = rates[m.Width + "x" + m.Height];
+                int near = Fallback.Near(hz, of);
+                if (near > 0) rows.Add(new SizeRow { Mode = new Resolution.Mode { Width = m.Width, Height = m.Height, Hz = near } });
+                else if (of.Count > 0)
+                    other.Add(new SizeRow { Mode = new Resolution.Mode { Width = m.Width, Height = m.Height },
+                        Only = "only at " + string.Join(", ", of.Select(r => r.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray()) + " Hz" });
+            }
+            rows.AddRange(other);
+            return rows;
+        }
+
         internal static string AspectText(Resolution.Mode m)
         {
             int a = m.Width, b = m.Height;
