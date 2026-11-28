@@ -245,7 +245,7 @@ namespace HdrSwitch
                 Color sbg = P.Surface;
                 if (page != null && sub == null)
                 {
-                    int bw = S(8) + S(16) + S(6) + TextRenderer.MeasureText("Games", fonts.Body, Size.Empty, TfLeft).Width + S(10);
+                    int bw = S(8) + S(16) + S(6) + TextRenderer.MeasureText("Games", fonts.Body, Size.Empty, TfMeasure).Width + S(10);
                     items.Add(new Item { Rect = new Rectangle(M - S(4), S(8), bw, S(32)), Key = "back", Name = "Back to Games", Click = GoBack, Paint = (g, rc, lk) =>
                     {
                         SubtleButton(g, rc, lk, "", fonts.Body, sbg, sbg);
@@ -266,7 +266,7 @@ namespace HdrSwitch
                 string head = picking ? "Add a program" : sub == "create" ? "Create a size" : sub == "res" ? "Competitive area" : "Stretch";
                 string headRight = picking ? "" : sub == "create" ? CreatorMonitor() : sub == "res" ? "at " + HzFor(page) + " Hz" : area != null ? "inside " + area.Text : "";
                 string forGame = page != null ? " for " + app.DisplayName(page) : "";
-                int rightW = headRight.Length == 0 ? 0 : TextRenderer.MeasureText(headRight, fonts.Caption, Size.Empty, TfLeft).Width + S(8);
+                int rightW = headRight.Length == 0 ? 0 : TextRenderer.MeasureText(headRight, fonts.Caption, Size.Empty, TfMeasure).Width + S(8);
                 int hx = back.Right + S(8);
                 items.Add(new Item { Rect = new Rectangle(hx, back.Y, W - M - hx, back.Height), Role = AccessibleRole.StaticText, Name = head + forGame + (headRight.Length > 0 ? ", " + headRight : ""), Paint = (g, rc, lk) =>
                 {
@@ -361,7 +361,7 @@ namespace HdrSwitch
                     else Draw(g, text, fonts.Body, P.Ink(P.Text1, bg), tr, TfLeft);
                     if (active)
                     {
-                        int tw = hasText ? Math.Min(tr.Width, TextRenderer.MeasureText(g, text, fonts.Body, Size.Empty, TfLeft).Width) : 0;
+                        int tw = hasText ? Math.Min(tr.Width, TextRenderer.MeasureText(g, text, fonts.Body, Size.Empty, TfMeasure).Width) : 0;
                         using (var b = new SolidBrush(P.Ink(P.Text1, bg))) g.FillRectangle(b, tr.X + tw + 1, rc.Y + S(7), Math.Max(1, S(1)), rc.Height - S(14));
                     }
                 } });
@@ -400,8 +400,8 @@ namespace HdrSwitch
                     RowBg(g, rc, lk, false);
                     int tx = rc.X + L, tw = tgOff - S(12) - L;
                     int top = rc.Y + (rc.Height - S(36)) / 2;
-                    int runW = running ? TextRenderer.MeasureText(g, RunMark, fonts.Caption, Size.Empty, TfLeft).Width : 0;
-                    int nameW = Math.Min(tw - runW, TextRenderer.MeasureText(g, shown, fonts.Body, Size.Empty, TfLeft).Width);
+                    int runW = running ? TextRenderer.MeasureText(g, RunMark, fonts.Caption, Size.Empty, TfMeasure).Width : 0;
+                    int nameW = Math.Min(tw - runW, TextRenderer.MeasureText(g, shown, fonts.Body, Size.Empty, TfMeasure).Width);
                     Draw(g, shown, fonts.Body, t1, new Rectangle(tx, top, nameW, S(20)), TfLeft);
                     if (running) Draw(g, RunMark, fonts.Caption, P.Ink(P.HighContrast ? P.Accent : P.HdrText, sbg), new Rectangle(tx + nameW, top + S(1), runW, S(20)), TfLeft);
                     Draw(g, recipe, fonts.Caption, t2, new Rectangle(tx, top + S(20), tw, S(16)), TfLeft);
@@ -444,8 +444,8 @@ namespace HdrSwitch
                     int textW = rc.Width - S(8);
                     Draw(g, gi.Name, fonts.Title, P.Ink(P.Text1, sbg), new Rectangle(rc.X + S(4), rc.Y, textW, S(28)), TfLeft);
                     const string RunMark = " · running";
-                    int runW = running ? TextRenderer.MeasureText(g, RunMark, fonts.Caption, Size.Empty, TfLeft).Width : 0;
-                    int subW = Math.Min(textW - runW, TextRenderer.MeasureText(g, subline, fonts.Caption, Size.Empty, TfLeft).Width);
+                    int runW = running ? TextRenderer.MeasureText(g, RunMark, fonts.Caption, Size.Empty, TfMeasure).Width : 0;
+                    int subW = Math.Min(textW - runW, TextRenderer.MeasureText(g, subline, fonts.Caption, Size.Empty, TfMeasure).Width);
                     Draw(g, subline, fonts.Caption, P.Ink(P.Text2, sbg), new Rectangle(rc.X + S(4), rc.Y + S(28), subW, S(16)), TfLeft);
                     if (running) Draw(g, RunMark, fonts.Caption, P.Ink(P.HighContrast ? P.Accent : P.HdrText, sbg), new Rectangle(rc.X + S(4) + subW, rc.Y + S(28), runW, S(16)), TfLeft);
                 } });
@@ -515,7 +515,7 @@ namespace HdrSwitch
                 {
                     Color bg = P.CardSolid;
                     if (enabled) CardHover(g, rc, lk, true, true);
-                    int vw = TextRenderer.MeasureText(g, value, fonts.Caption, Size.Empty, TfLeft).Width + S(2);
+                    int vw = TextRenderer.MeasureText(g, value, fonts.Caption, Size.Empty, TfMeasure).Width + S(2);
                     int chevW = opens ? S(16) + S(8) : 0;
                     int ix = rc.X + S(14), tx = ix + S(20) + S(12), tw = rc.Right - S(12) - chevW - vw - S(12) - tx;
                     double on = Math.Max(0, Math.Min(1, lk.On));
@@ -562,7 +562,7 @@ namespace HdrSwitch
                     CardHover(g, rc, lk, true, !open);
                     int lv = ShownLevel();   // follows a drag
                     string value = BrightnessText(lv);
-                    int vw = TextRenderer.MeasureText(g, value, fonts.Caption, Size.Empty, TfLeft).Width + S(2);
+                    int vw = TextRenderer.MeasureText(g, value, fonts.Caption, Size.Empty, TfMeasure).Width + S(2);
                     int right = S(12) + S(16) + S(8) + vw + S(12);
                     RowText(g, rc, "bright", "SDR brightness", BrightnessDesc(lv, hdr), lv >= 0 ? 1 : 0, right);
                     Draw(g, value, fonts.Caption, P.Ink(P.Text2, bg), new Rectangle(rc.Right - S(12) - S(16) - S(8) - vw, rc.Y, vw, rc.Height), TfLeft | TextFormatFlags.Right);
@@ -598,7 +598,7 @@ namespace HdrSwitch
                 // "Use Windows' level": a check box. Unticked, the game gets Windows' level now as its own.
                 bool windows = level < 0;
                 string label = "Use Windows' level";
-                int cbW = S(20) + S(8) + TextRenderer.MeasureText(label, fonts.Body, Size.Empty, TfLeft).Width + S(8);
+                int cbW = S(20) + S(8) + TextRenderer.MeasureText(label, fonts.Body, Size.Empty, TfMeasure).Width + S(8);
                 var cb = new Rectangle(left - S(4), sr.Bottom, cbW + S(4), S(32));
                 items.Add(new Item { Rect = cb, Key = "bright:windows", Role = AccessibleRole.CheckButton, Selected = windows, On = windows, Name = label, Click = () =>
                 {
@@ -665,8 +665,8 @@ namespace HdrSwitch
                     Outline(g, rc, S(4), P.ControlStroke);
                 } });
                 string cur = area.Hz > 0 ? area.Text + " @ " + area.Hz + " Hz" : area.Text;
-                int moreW = TextRenderer.MeasureText("More…", fonts.Label, Size.Empty, TfLeft).Width + S(32);
-                int newW = TextRenderer.MeasureText("Create…", fonts.Label, Size.Empty, TfLeft).Width + S(24);
+                int moreW = TextRenderer.MeasureText("More…", fonts.Label, Size.Empty, TfMeasure).Width + S(32);
+                int newW = TextRenderer.MeasureText("Create…", fonts.Label, Size.Empty, TfMeasure).Width + S(24);
                 var curR = new Rectangle(seg.X + S(2), seg.Y + S(2), seg.Width - S(4) - moreW - newW, seg.Height - S(4));
                 var moreR = new Rectangle(curR.Right, curR.Y, moreW, curR.Height);
                 var newR = new Rectangle(moreR.Right, curR.Y, newW, curR.Height);
@@ -795,7 +795,7 @@ namespace HdrSwitch
                         : "Missing a size? Create it by its diagonal, at " + hz + " Hz.";
                     // The area's list ends with the way to a size the display doesn't have yet: the creator.
                     const string CreateText = "Create a size…";
-                    int createW = stretchList ? 0 : TextRenderer.MeasureText(CreateText, fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                    int createW = stretchList ? 0 : TextRenderer.MeasureText(CreateText, fonts.Body, Size.Empty, TfMeasure).Width + S(24);
                     items.Add(new Item { Rect = new Rectangle(c3.X + S(4), listClip.Bottom + S(4), c3.Width - S(8) - (createW > 0 ? createW + S(8) : 0), footH - S(8)), Paint = (g, rc, lk) =>
                         Draw(g, note, fonts.Caption, t2, rc, TextFormatFlags.NoPadding | TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.VerticalCenter) });
                     if (createW > 0)

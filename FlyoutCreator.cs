@@ -582,7 +582,7 @@ namespace HdrSwitch
                 var rects = new List<Rectangle>();
                 for (int i = buttons.Count - 1; i >= 0; i--)
                 {
-                    int bw = TextRenderer.MeasureText(buttons[i].Text, buttons[i].Accent ? fonts.Strong : fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                    int bw = TextRenderer.MeasureText(buttons[i].Text, buttons[i].Accent ? fonts.Strong : fonts.Body, Size.Empty, TfMeasure).Width + S(24);
                     rects.Insert(0, new Rectangle(x - bw, y + (barH - S(32)) / 2, bw, S(32)));
                     x -= bw + S(8);
                 }
@@ -880,12 +880,12 @@ namespace HdrSwitch
                 } });
                 if (!has) return h;
                 // Under the text, from its left edge – further left when they wouldn't fit beside each other otherwise.
-                int total = buttons.Sum(b => TextRenderer.MeasureText(b.Text, fonts.Body, Size.Empty, TfLeft).Width + S(24)) + (buttons.Length - 1) * S(8);
+                int total = buttons.Sum(b => TextRenderer.MeasureText(b.Text, fonts.Body, Size.Empty, TfMeasure).Width + S(24)) + (buttons.Length - 1) * S(8);
                 int x = Math.Max(r.X + S(12), Math.Min(r.X + tx, r.Right - S(12) - total));
                 foreach (var b in buttons)
                 {
                     var button = b;
-                    int bw = TextRenderer.MeasureText(b.Text, fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                    int bw = TextRenderer.MeasureText(b.Text, fonts.Body, Size.Empty, TfMeasure).Width + S(24);
                     items.Add(new Item { Rect = new Rectangle(x, r.Y + h - S(12) - S(32), bw, S(32)), Key = b.Key, Name = b.Name ?? b.Text, Click = b.Click,
                         Paint = (g, rc, lk) => StandardButton(g, rc, lk, fill, null, button.Text) });
                     x += bw + S(8);
@@ -964,7 +964,7 @@ namespace HdrSwitch
 
                 // CRU's folder.
                 var fr = new Rectangle(M, y, cw, rowCH);
-                int chooseW = TextRenderer.MeasureText("Choose…", fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                int chooseW = TextRenderer.MeasureText("Choose…", fonts.Body, Size.Empty, TfMeasure).Width + S(24);
                 bool ready = CruReady();
                 string folderDesc = crNote ?? (app.cruFolder == null ? "Not set · needed to create resolutions" : ready ? app.cruFolder : "CRU isn't there any more: " + app.cruFolder);
                 items.Add(new Item { Rect = fr, Key = "cru", Role = AccessibleRole.StaticText, Name = "CRU folder", Tip = folderDesc,
@@ -974,7 +974,7 @@ namespace HdrSwitch
                 y += rowCH;
 
                 // What was added, per monitor.
-                int removeW = TextRenderer.MeasureText("Remove", fonts.Body, Size.Empty, TfLeft).Width + S(24);
+                int removeW = TextRenderer.MeasureText("Remove", fonts.Body, Size.Empty, TfMeasure).Width + S(24);
                 for (int i = 0; i < backups.Count; i++)
                 {
                     var b = backups[i];
