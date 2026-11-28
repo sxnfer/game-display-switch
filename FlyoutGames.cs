@@ -212,7 +212,7 @@ namespace HdrSwitch
             /// <summary>The display offers this size at this rate (else it has to be created first).</summary>
             bool Offered(string gdi, Resolution.Mode m, int hz)
             {
-                if (sample != null) return sample.Modes.Any(x => x.Width == m.Width && x.Height == m.Height);
+                if (sample != null) return Fallback.Near(hz, sample.Modes.Where(x => x.Width == m.Width && x.Height == m.Height).Select(x => x.Hz)) > 0;
                 try { return Resolution.Available(gdi, m.Width, m.Height, hz); }
                 catch (Exception e) { Guard.Log("Asking for a resolution", e); return true; }
             }
@@ -684,8 +684,9 @@ namespace HdrSwitch
             /// <summary>
             /// A list under a view: the programs running with a window (to add one), or – from a game's page – every size
             /// the display offers at the game's rate (Off, then the screen's own shape first, each with how much of the
-            /// panel it covers), or the sizes that fit inside its area, to stretch over it. A pick saves it, applies it
-            /// if the game runs, and goes back to the page.
+            /// panel it covers), or the sizes that fit inside its area, to stretch over it (TrayApp.SizeRows: a size
+            /// one Hz off the rate counts, and the sizes the display has at other rates only come last, greyed, saying
+            /// at which). A pick saves it, applies it if the game runs, and goes back to the page.
             /// </summary>
             int BuildList(int W, int M, int y)
             {
@@ -695,6 +696,7 @@ namespace HdrSwitch
                 bool areaList = sub == "res", stretchList = sub == "stretch";
                 var names = new List<string>();
                 var modes = new List<Resolution.Mode>();   // null first: Off / Not stretched
+                var only = new List<string>();             // beside modes: why a row can't be picked ("only at 60 Hz"), or null
                 Resolution.Mode chosen = null, full = null;
                 double inches = 0;
                 int hz = 0;
@@ -705,16 +707,16 @@ namespace HdrSwitch
                     ScreenNow(out gdi, out full, out inches);
                     app.profiles.TryGetValue(game, out chosen);
                     hz = HzFor(game);
-                    int hzNow = hz;
-                    string gdiNow = gdi;
-                    Func<IEnumerable<Resolution.Mode>> all = () => sample != null ? (IEnumerable<Resolution.Mode>)sample.Modes : Resolution.Modes(gdiNow, hzNow);
                     modes.Add(null);
-                    if (stretchList && chosen != null)   // the game's own resolution: the sizes inside the area, which the GPU stretches over it
-                        modes.AddRange(all().Where(m => Fits(m, chosen)).OrderByDescending(m => (long)m.Width * m.Height));
-                    else if (areaList && full != null)
-                        modes.AddRange(all()
-                            .Where(m => m.Width < full.Width || m.Height < full.Height)
-                            .OrderBy(m => SameAspect(m, full) ? 0 : 1).ThenByDescending(m => (long)m.Width * m.Height));
+                    only.Add(null);
+                    // The game's own resolution: the sizes inside the area, which the GPU stretches over it. Else the area's.
+                    bool inArea = stretchList && chosen != null;
+                    if (inArea || (areaList && full != null))
+                        foreach (var row in SizeRows(sample != null ? (IEnumerable<Resolution.Mode>)sample.Modes : Resolution.Modes(gdi), hz, full, inArea ? chosen : null))
+                        {
+                            modes.Add(row.Mode);
+                            only.Add(row.Only);
+                        }
                 }
                 int count = picking ? names.Count : modes.Count;
                 bool subView = !picking;
@@ -767,6 +769,18 @@ namespace HdrSwitch
                     }
                     bool sel = isOn;
                     string lab = label, det = detail;
+                    if (only[i] != null)   // the display has this size, but not at this rate: shown, said, not to be picked
+                    {
+                        string why = only[i];
+                        Color off = P.Ink(P.TextDisabled, sbg);
+                        items.Add(new Item { Rect = rr, Scrolls = true, RingInside = true, Key = key, Name = lab + ", " + why + ", not at " + hz + " Hz", Role = AccessibleRole.RadioButton, Listed = true,
+                            Tip = "The display has " + lab + " " + why + ", not at " + hz + " Hz", Paint = (g, rc, lk) =>
+                        {
+                            Draw(g, lab, fonts.Body, off, new Rectangle(rc.X + L, rc.Y, S(130), rowH), TfLeft);
+                            Draw(g, why, fonts.Caption, off, new Rectangle(rc.X + L + S(130), rc.Y, rc.Width - 2 * L - S(130), rowH), TfLeft | TextFormatFlags.Right);
+                        } });
+                        continue;
+                    }
                     items.Add(new Item { Rect = rr, Scrolls = true, RingInside = true, Key = key, Name = lab + (det.Length > 0 ? ", " + det : ""), Role = AccessibleRole.RadioButton, Selected = sel, Click = pick, Paint = (g, rc, lk) =>
                     {
                         RowBg(g, rc, lk, sel);

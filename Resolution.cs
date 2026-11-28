@@ -51,8 +51,8 @@ namespace HdrSwitch
         /// <summary>The mode saved in Windows display settings – what a reboot comes back at – or null.</summary>
         public static Mode Saved(string gdi) { return Enum(gdi, ENUM_REGISTRY_SETTINGS); }
 
-        /// <summary>Every size the display offers at this refresh rate (any scaling variant), largest first.</summary>
-        public static List<Mode> Modes(string gdi, int hz)
+        /// <summary>Every mode the display offers: each size at each refresh rate, once (any scaling variant), largest first.</summary>
+        public static List<Mode> Modes(string gdi)
         {
             var seen = new HashSet<string>();
             var list = new List<Mode>();
@@ -60,16 +60,20 @@ namespace HdrSwitch
             {
                 var dm = NewMode();
                 if (!EnumDisplaySettingsExW(gdi, i, ref dm, 0)) break;
-                if ((int)dm.dmDisplayFrequency != hz || dm.dmBitsPerPel != 32 || dm.dmDisplayOrientation != 0) continue;
-                if (seen.Add(dm.dmPelsWidth + "x" + dm.dmPelsHeight))
-                    list.Add(new Mode { Width = (int)dm.dmPelsWidth, Height = (int)dm.dmPelsHeight, Hz = hz });
+                if (dm.dmBitsPerPel != 32 || dm.dmDisplayOrientation != 0) continue;
+                if (seen.Add(dm.dmPelsWidth + "x" + dm.dmPelsHeight + "@" + dm.dmDisplayFrequency))
+                    list.Add(new Mode { Width = (int)dm.dmPelsWidth, Height = (int)dm.dmPelsHeight, Hz = (int)dm.dmDisplayFrequency });
             }
-            return list.OrderByDescending(m => (long)m.Width * m.Height).ToList();
+            return list.OrderByDescending(m => (long)m.Width * m.Height).ThenByDescending(m => m.Hz).ToList();
         }
 
+        /// <summary>
+        /// The display offers this size at this rate, or at one Hz above or below it: Windows reports whole Hz, and
+        /// the same rate shows up as 239 on one size and 240 on another (Fallback.cs), which is how it is switched too.
+        /// </summary>
         public static bool Available(string gdi, int w, int h, int hz)
         {
-            return Modes(gdi, hz).Any(m => m.Width == w && m.Height == h);
+            return Fallback.Near(hz, Rates(gdi, w, h)) > 0;
         }
 
         /// <summary>The refresh rates at which the display offers this size, lowest first.</summary>

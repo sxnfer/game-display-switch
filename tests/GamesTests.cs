@@ -33,6 +33,58 @@ namespace HdrSwitch.Tests
             Run.Equal("HDR", TrayApp.GameRecipe(Game(true, -1, null, M(1776, 1332))), "a stretch without an area: nothing to stretch over");
         }
 
+        // ---- a page's size list ----
+
+        static string Rows(List<TrayApp.SizeRow> rows)
+        {
+            var parts = new List<string>();
+            foreach (var r in rows) parts.Add(r.Mode.Width + "x" + r.Mode.Height + (r.Only != null ? " (" + r.Only + ")" : "@" + r.Mode.Hz));
+            return string.Join(" | ", parts.ToArray());
+        }
+
+        public static void GamesSizeListArea()
+        {
+            var full = M(2560, 1440, 240);
+            var all = new List<Resolution.Mode> { M(2560, 1440, 240), M(2560, 1440, 60), M(2368, 1332, 240), M(2368, 1332, 60), M(1920, 1440, 240), M(1920, 1080, 240), M(1280, 960, 240) };
+            Run.Equal("2368x1332@240 | 1920x1080@240 | 1920x1440@240 | 1280x960@240", Rows(TrayApp.SizeRows(all, 240, full, null)),
+                "at the exact rate: one row per size, not the panel's own, its shape first, then the largest first");
+
+            // The same rate as Windows rounds it for another size: 239 next to 240 is one row, and 239 alone counts.
+            all = new List<Resolution.Mode> { M(2368, 1332, 239), M(2368, 1332, 240), M(2072, 1296, 239), M(1920, 1080, 241), M(1600, 900, 238), M(1600, 900, 242) };
+            var rows = TrayApp.SizeRows(all, 240, full, null);
+            Run.Equal("2368x1332@240 | 1920x1080@241 | 2072x1296@239 | 1600x900 (only at 238, 242 Hz)", Rows(rows), "one Hz off counts, two don't; the exact rate wins");
+            Run.Equal(1, rows.FindAll(r => r.Mode.Width == 2368).Count, "239 and 240 never make two rows");
+            Run.Equal("2368x1332@239 | 2072x1296@239", Rows(TrayApp.SizeRows(new List<Resolution.Mode> { M(2368, 1332, 239), M(2368, 1332, 240), M(2072, 1296, 239) }, 239, full, null)), "asked at 239: the same");
+            Run.Equal("2368x1332@144 | 2072x1296@143", Rows(TrayApp.SizeRows(new List<Resolution.Mode> { M(2368, 1332, 144), M(2368, 1332, 143), M(2072, 1296, 143) }, 144, full, null)), "at 144");
+
+            // Sizes the display has at other rates only: at the end, in the same order, saying at which, not to be picked.
+            all = new List<Resolution.Mode> { M(1024, 768, 60), M(1280, 720, 120), M(1280, 720, 60), M(2368, 1332, 240), M(1920, 1080, 60), M(1920, 1080, 240), M(800, 600, 60), M(800, 600, 75), M(800, 600, 120) };
+            rows = TrayApp.SizeRows(all, 240, full, null);
+            Run.Equal("2368x1332@240 | 1920x1080@240 | 1280x720 (only at 60, 120 Hz) | 1024x768 (only at 60 Hz) | 800x600 (only at 60, 75, 120 Hz)", Rows(rows), "only at other rates: last");
+            Run.True(rows[0].Only == null && rows[1].Only == null && rows[2].Only != null && rows[2].Mode.Hz == 0, "which rows can be picked");
+            Run.Equal("1920x1080@60 | 1280x720@60 | 1024x768@60 | 800x600@60 | 2368x1332 (only at 240 Hz)", Rows(TrayApp.SizeRows(all, 60, full, null)), "the same display at 60 Hz");
+
+            // Nothing beyond the panel either way, and not the panel itself, at any rate.
+            all = new List<Resolution.Mode> { M(3840, 2160, 240), M(3840, 1080, 240), M(1920, 1600, 240), M(2560, 1440, 240), M(2560, 1440, 60), M(2560, 1080, 240), M(3840, 2160, 60) };
+            Run.Equal("2560x1080@240", Rows(TrayApp.SizeRows(all, 240, full, null)), "larger than native in width or height: left out, also from the greyed rows");
+
+            Run.Equal("", Rows(TrayApp.SizeRows(null, 240, full, null)), "no modes");
+            Run.Equal("", Rows(TrayApp.SizeRows(all, 240, null, null)), "no panel size");
+            Run.Equal("2560x1080 (only at 240 Hz)", Rows(TrayApp.SizeRows(all, 0, full, null)), "no rate: nothing can be picked");
+        }
+
+        public static void GamesSizeListStretch()
+        {
+            var full = M(2560, 1440, 240);
+            var area = M(2368, 1332);
+            var all = new List<Resolution.Mode> { M(2560, 1440, 240), M(2368, 1332, 240), M(1920, 1440, 240), M(1920, 1080, 240), M(1776, 1332, 240), M(2368, 1080, 240), M(1280, 960, 239), M(1280, 960, 240), M(1440, 1080, 239), M(1024, 768, 60) };
+            Run.Equal("2368x1080@240 | 1776x1332@240 | 1920x1080@240 | 1440x1080@239 | 1280x960@240 | 1024x768 (only at 60 Hz)", Rows(TrayApp.SizeRows(all, 240, full, area)),
+                "the sizes inside the area – not the area itself, nothing taller or wider – the largest first, whatever their shape");
+            Run.Equal("", Rows(TrayApp.SizeRows(new List<Resolution.Mode> { M(2368, 1332, 240), M(2560, 1440, 240) }, 240, full, area)), "nothing fits inside");
+            Run.Equal("1024x768@60 | 2368x1080 (only at 240 Hz) | 1776x1332 (only at 240 Hz) | 1920x1080 (only at 240 Hz) | 1440x1080 (only at 239 Hz) | 1280x960 (only at 239, 240 Hz)",
+                Rows(TrayApp.SizeRows(all, 60, null, area)), "at 60 Hz, and without the panel's size");
+        }
+
         public static void GamesSearch()
         {
             Run.True(TrayApp.GameMatches("", "Counter-Strike 2", "cs2"), "nothing typed: every game");

@@ -1361,6 +1361,14 @@ namespace HdrSwitch
                 {
                     focus = items.FindIndex(it => it.Key == focusKey);
                     keyboard = focus >= 0;
+                    if (focus >= 0 && items[focus].Scrolls)   // a row further down a list: scrolled to, as the keyboard would
+                    {
+                        Rectangle at = items[focus].Rect;
+                        scrollTo.Snap(Math.Max(0, Math.Min(scrollMax, at.Bottom > listClip.Bottom ? at.Bottom - listClip.Bottom : 0)));
+                        this.focusKey = focusKey;
+                        Rebuild();
+                        focus = items.FindIndex(it => it.Key == focusKey);
+                    }
                 }
                 var size = new Size(S(372), contentH);
                 var bmp = new Bitmap(size.Width, size.Height, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
@@ -1981,7 +1989,7 @@ namespace HdrSwitch
         /// Counter-Strike 2 with HDR, SDR brightness 40, a competitive area and No scaling; stretch – VALORANT
         /// stretched over its area; grace – it closed, back to SDR in 2 s; recording – OBS keeps HDR off; paused; idle.
         /// The library has ten games: with HDR or never, brightness, areas, a stretch, and one area the display lacks.
-        /// --view game shows --game's page (cs2 unless given); --expand brightness opens its slider (the area is open
+        /// --focus on a row further down a list scrolls the list to it. --view game shows --game's page (cs2 unless given); --expand brightness opens its slider (the area is open
         /// whenever it is set). --view creator shows the resolution creator for --game, in the state --creator names.
         /// </summary>
         internal static int RenderFlyout(string[] args)
@@ -2003,8 +2011,10 @@ namespace HdrSwitch
                 Inches = 26.5,
                 Windowed = new List<string> { "discord", "obs64", "spotify" },
             };
-            foreach (var m in new[] { new[] { 2368, 1332 }, new[] { 1920, 1080 }, new[] { 1920, 1440 }, new[] { 1776, 1332 }, new[] { 1600, 900 }, new[] { 1280, 960 } })
-                sample.Modes.Add(new Resolution.Mode { Width = m[0], Height = m[1], Hz = 240 });
+            // 2072 × 1296 only at 239 Hz (the same rate, as Windows rounds it for that size), and two sizes at lower rates only.
+            foreach (var m in new[] { new[] { 2368, 1332, 240 }, new[] { 2072, 1296, 239 }, new[] { 1920, 1080, 240 }, new[] { 1920, 1080, 60 }, new[] { 1920, 1440, 240 }, new[] { 1776, 1332, 240 },
+                new[] { 1600, 900, 240 }, new[] { 1280, 960, 240 }, new[] { 1280, 720, 60 }, new[] { 1280, 720, 120 }, new[] { 1024, 768, 60 } })
+                sample.Modes.Add(new Resolution.Mode { Width = m[0], Height = m[1], Hz = m[2] });
             var app = new TrayApp(sample);
             sample.Nvidia = !args.Contains("--no-nvidia");
             sample.Creator = arg("--creator", "ready");

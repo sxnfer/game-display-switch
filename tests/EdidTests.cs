@@ -435,8 +435,11 @@ namespace HdrSwitch.Tests
             Run.Equal("Timing,Timing,Name,Range", string.Join(",", p.Descriptors.Select(q => q.Kind.ToString()).ToArray()), "descriptors");
             var t = p.Descriptors[1].Timing;
             // At 144 Hz RB2's front porch is beyond a DTD's 6 bits, so this one is CVT-RB v1, at the native 143.999 Hz.
-            var expected = Edid.Cvt(2368, 1332, Edid.MatchNativeRate(Edid.Parse(e), 144), Edid.CvtMode.ReducedBlanking);
+            // Its clock is the DTD's own 10 kHz step, the first at which the rate isn't under the native one.
+            double native144 = Edid.MatchNativeRate(Edid.Parse(e), 144);
+            var expected = Edid.WithRateAtLeast(Edid.Cvt(2368, 1332, native144, Edid.CvtMode.ReducedBlanking), native144, 10000);
             Run.True(t.SameTiming(expected), "the CVT-RB timing: " + t.Text);
+            Run.True(t.Hz >= native144 && t.Hz - native144 < 0.02, "not under the native " + native144.ToString("0.000") + ": " + t.Hz.ToString("0.000000"));
             Run.Equal("597x336", t.WidthMm + "x" + t.HeightMm, "image size copied from the native DTD");
             Run.True(p.Native.SameTiming(Edid.Parse(e).Native), "the native DTD is untouched");
 
@@ -515,7 +518,8 @@ namespace HdrSwitch.Tests
             Run.Equal(121, d.SectionLength, "section length");
             var t = d.Timings[1];
             var native = Edid.Parse(e).Extensions[1].DisplayId.Timings[0];
-            Run.True(t.SameTiming(Edid.WithClockStep(Edid.Cvt(2368, 1332, native.Hz, Edid.CvtMode.ReducedBlanking2), 10000)), "CVT-RB2 at the native rate: " + t.Text);
+            Run.True(t.SameTiming(Edid.WithRateAtLeast(Edid.Cvt(2368, 1332, native.Hz, Edid.CvtMode.ReducedBlanking2), native.Hz, 10000)), "CVT-RB2 at the native rate: " + t.Text);
+            Run.True(t.Hz >= native.Hz && t.Hz - native.Hz < 0.02, "not under the native rate: " + t.Hz.ToString("0.000000") + " to " + native.Hz.ToString("0.000000"));
             Run.True(t.ClockHz > Edid.MaxDtdClock && !t.Preferred, "beyond 655.35 MHz, not preferred");
             Run.True(d.Timings[0].SameTiming(native) && d.Timings[0].Preferred, "the monitor's own timing is untouched");
 
@@ -539,7 +543,9 @@ namespace HdrSwitch.Tests
             var p = Edid.Parse(r);
             d = p.Extensions[1].DisplayId;
             Run.Equal(98, d.FreeBytes, "AOC: DisplayID free bytes");
-            Run.True(d.Timings.Count == 1 && d.Timings[0].SameTiming(Edid.WithClockStep(Edid.Cvt(2368, 1332, 143.911545, Edid.CvtMode.ReducedBlanking2), 10000)), "AOC: CVT-RB2 at 143.912");
+            double aocRate = Edid.MatchNativeRate(Edid.Parse(e), 144);
+            Run.True(d.Timings.Count == 1 && d.Timings[0].SameTiming(Edid.WithRateAtLeast(Edid.Cvt(2368, 1332, aocRate, Edid.CvtMode.ReducedBlanking2), aocRate, 10000)), "AOC: CVT-RB2 at 143.912");
+            Run.True(d.Timings[0].Hz >= aocRate, "AOC: not under the native rate");
             Run.Near(143.91, d.Timings[0].Hz, 0.01, "AOC: its rate");
 
             // A base block alone.
@@ -567,7 +573,91 @@ namespace HdrSwitch.Tests
             EdidSound(r, "DisplayID 2.0");
             d = Edid.Parse(r).Extensions[1].DisplayId;
             Run.Equal("34/0/40", string.Join(",", d.DataBlocks.Select(b => b.Tag + "/" + b.Revision + "/" + b.Length).ToArray()), "DisplayID 2.0: the Type VII block grew");
-            Run.True(d.Timings[1].SameTiming(Edid.Cvt(2368, 1332, rate, Edid.CvtMode.ReducedBlanking2)), "DisplayID 2.0: CVT-RB2 to the kHz: " + d.Timings[1].Text);
+            Run.True(d.Timings[1].SameTiming(Edid.WithRateAtLeast(Edid.Cvt(2368, 1332, rate, Edid.CvtMode.ReducedBlanking2), rate, 1000)), "DisplayID 2.0: CVT-RB2 to the kHz: " + d.Timings[1].Text);
+            Run.True(d.Timings[1].Hz >= rate && d.Timings[1].Hz - rate < 0.002, "DisplayID 2.0: not under the native rate");
+        }
+
+        // ---- the rate of an added resolution: never under the native mode's ----
+
+        public static void EdidClockForARateAtLeast()
+        {
+            // 2072×1296 at 240 Hz: CVT's own clock is a hair under, the one that is stored isn't.
+            var cvt = Edid.Cvt(2072, 1296, 240, Edid.CvtMode.ReducedBlanking2);
+            Run.True(cvt.Hz < 240, "CVT rounds the clock down: " + cvt.Hz.ToString("0.000000"));
+            foreach (long step in new long[] { 1000, 10000, 250000 })
+            {
+                var t = Edid.WithRateAtLeast(cvt, 240, step);
+                long total = (long)t.HTotal * t.VTotal;
+                Run.True(t.ClockHz % step == 0 && t.Hz >= 240, step + ": a multiple of the step, 240 Hz or more: " + t.Hz.ToString("0.000000"));
+                Run.True((double)(t.ClockHz - step) / total < 240, step + ": one step less would be under 240");
+                Run.True(t.HTotal == cvt.HTotal && t.VTotal == cvt.VTotal && t.VFront == cvt.VFront, step + ": only the clock changes");
+            }
+            // A rate that is a whole number of steps stays exactly there.
+            var even = new Edid.Timing { Width = 1920, Height = 1080, HFront = 8, HSync = 32, HBack = 40, VFront = 1, VSync = 8, VBack = 11, ClockHz = 1 };
+            Run.Equal((long)2000 * 1100 * 60, Edid.WithRateAtLeast(even, 60, 10000).ClockHz, "2000 × 1100 at 60 Hz: 132 MHz exactly");
+            Run.True(Edid.WithRateAtLeast(null, 60, 10000) == null && Edid.WithRateAtLeast(even, 0, 10000) == null && Edid.WithRateAtLeast(even, 60, 0) == null, "nothing to work out: null");
+        }
+
+        /// <summary>The ASRock sample with a 2560×1440 timing at this rate in its DisplayID extension (Type I, or 2.0's Type VII), and its CTA block's free room and its base descriptor as asked.</summary>
+        static byte[] EdidForRate(double hz, bool freeSlot, bool ctaRoom, bool typeVii)
+        {
+            byte[] e = freeSlot ? EdidWithFreeSlot() : EdidAsrock();
+            if (!ctaRoom)
+            {
+                e[128 + 126] = 0x01;   // something after the DTDs that isn't padding: the block is left alone
+                Edid.FixBlock(e, 1);
+            }
+            var native = Edid.WithClockStep(Edid.Cvt(2560, 1440, hz, Edid.CvtMode.ReducedBlanking2), typeVii ? 1000 : 10000);
+            native.Preferred = true;
+            if (typeVii)
+            {
+                e[257] = 0x20;
+                e[256 + 5] = 0x22;
+                e[256 + 6] = 0x00;
+            }
+            Array.Copy(Edid.EncodeDisplayIdTiming(native, typeVii), 0, e, 256 + 8, 20);
+            e[256 + 126] = Edid.Checksum(e, 257, 126);
+            Edid.FixBlock(e, 2);
+            return e;
+        }
+
+        public static void EdidAddedRateIsNeverUnderTheNativeOne()
+        {
+            int[][] sizes = { new[] { 2368, 1332 }, new[] { 2072, 1296 }, new[] { 2320, 1306 }, new[] { 1920, 1440 }, new[] { 1776, 1332 } };
+            double[] rates = { 240, 239.97, 165, 144, 143.912, 59.951 };
+            // The four places a mode can go: a free base descriptor, the CTA-861 block, DisplayID 1.x (Type I), DisplayID 2.0 (Type VII).
+            string[] paths = { "base", "cta", "type1", "type7" };
+            var went = new Dictionary<string, int>();
+            foreach (string path in paths)
+                foreach (double hz in rates)
+                    foreach (int[] s in sizes)
+                    {
+                        string what = path + " " + s[0] + "×" + s[1] + " @ " + hz.ToString("0.###");
+                        byte[] e = EdidForRate(hz, path == "base", path == "base" || path == "cta", path == "type7");
+                        var before = Edid.Parse(e);
+                        Run.True(before != null, what + ": the sample parses");
+                        if (before == null) continue;
+                        double native = Edid.MatchNativeRate(before, hz);
+                        Run.True(native > 0, what + ": the display has the rate");
+                        string where;
+                        byte[] r = Edid.AddResolution(e, s[0], s[1], hz, out where);
+                        Run.True(r != null, what + ": added (" + where + ")");
+                        if (r == null) continue;
+                        var after = Edid.Parse(r);
+                        var added = after == null ? null : after.Timings.FirstOrDefault(t => t.Width == s[0] && t.Height == s[1] && !before.Timings.Any(b => b.SameTiming(t)));
+                        Run.True(added != null, what + ": the new timing is there");
+                        if (added == null) continue;
+                        Run.True(added.Hz >= native, what + ": " + added.Hz.ToString("0.000000") + " Hz is not under the native " + native.ToString("0.000000"));
+                        Run.True(added.Hz - native < 0.02, what + ": " + added.Hz.ToString("0.000000") + " Hz is within 0.02 of the native " + native.ToString("0.000000"));
+                        string kind = where.StartsWith("base block") ? "base" : where.StartsWith("CTA-861") ? "cta"
+                            : where.StartsWith("DisplayID") ? (after.Extensions[1].DisplayId.IsV2 ? "type7" : "type1") : where;
+                        int n;
+                        went.TryGetValue(kind, out n);
+                        went[kind] = n + 1;
+                        if (hz < 100) Run.Equal(path, kind, what + ": where it went");   // at 60 Hz every size fits a DTD
+                    }
+            foreach (string path in paths) Run.True(went.ContainsKey(path) && went[path] >= sizes.Length, path + ": tried (" + (went.ContainsKey(path) ? went[path] : 0) + " modes)");
+            Run.Equal(paths.Length, went.Count, "nothing went anywhere else: " + string.Join(", ", went.Keys.ToArray()));
         }
 
         public static void EdidAddOpensASecondDisplayIdBlockAndStopsWhenFull()

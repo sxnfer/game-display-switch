@@ -561,7 +561,8 @@ namespace HdrSwitch
         ///    takes the rest, a clock in steps of 1 kHz.
         /// Both keep at least 460 µs of vertical blanking, with horizontal sync positive and vertical negative. The
         /// width is used as given: v1's rounding to a multiple of 8 is left out, because the creator has to get
-        /// exactly the size it asked for. The clock is rounded down, so the real rate (Timing.Hz) is a hair under hz.
+        /// exactly the size it asked for. The clock is rounded down as CVT says, so the real rate (Timing.Hz) is a hair
+        /// under hz; AddResolution takes the blanking from here and sets the clock itself (WithRateAtLeast).
         /// </summary>
         public static Timing Cvt(int w, int h, double hz, CvtMode mode)
         {
@@ -610,6 +611,20 @@ namespace HdrSwitch
             return c;
         }
 
+        /// <summary>
+        /// The same timing with the lowest clock, a multiple of step Hz, at which its real rate (Timing.Hz) is hz or
+        /// more: above hz by less than one step of the clock (step / (h total × v total) Hz), never below it. Worked
+        /// out at the step the format stores, so nothing is rounded twice.
+        /// </summary>
+        public static Timing WithRateAtLeast(Timing t, double hz, long step)
+        {
+            if (t == null || step <= 0 || hz <= 0 || double.IsNaN(hz) || double.IsInfinity(hz) || t.HTotal <= 0 || t.VTotal <= 0) return null;
+            var c = t.Copy();
+            c.ClockHz = Math.Max(1, (long)Math.Floor(hz * t.HTotal * t.VTotal / step)) * step;
+            while (c.Hz < hz) c.ClockHz += step;
+            return c;
+        }
+
         // ---- refresh rates ----
 
         /// <summary>
@@ -641,8 +656,11 @@ namespace HdrSwitch
         /// <summary>
         /// A copy of the EDID with w × h at hz added, and where it went. Null with the reason in where if it can't be:
         /// an EDID that doesn't parse, a size above native, a rate the native size doesn't have, a mode that is there
-        /// already, or no room. The rate becomes the native one it matches exactly (144 → 143.912), so the new mode
-        /// reports the same whole rate as the native mode it is switched from. The input is never changed.
+        /// already, or no room. The rate becomes the native one it matches (144 → 143.912), and the new mode's clock
+        /// is the lowest its format can store (10 kHz in a DTD or a DisplayID Type I timing, 1 kHz in a Type VII) at
+        /// which its real rate is not below the native mode's: the same or up to one clock step above (under 0.02 Hz
+        /// at the sizes a monitor is used at), never a hair under – a mode a hair under 240 Hz is one Windows may
+        /// list as 239 next to a native 240. The input is never changed.
         /// </summary>
         public static byte[] AddResolution(byte[] edid, int w, int h, double hz, out string where)
         {
@@ -672,10 +690,16 @@ namespace HdrSwitch
 
             // The timing: CVT-RB2, the one current drivers and CRU default to. Its front porch grows with the refresh
             // rate and a DTD has 6 bits for it, so for a DTD the fallback is CVT-RB v1, whose back porch grows instead.
+            // CVT gives the blanking; the clock is then set for the format it is stored in (WithRateAtLeast). The v1
+            // fallback gets a 10 kHz clock too, as the DTD stores it: CVT's own 0.25 MHz step would be up to 0.1 Hz off.
             Timing rb2 = Cvt(w, h, rate, CvtMode.ReducedBlanking2), rb1 = Cvt(w, h, rate, CvtMode.ReducedBlanking);
             if (rb2 == null || rb1 == null) { where = "No timing can be worked out for that size and rate."; return null; }
-            Timing dtd = WithClockStep(rb2, 10000);
-            if (!FitsDtd(dtd)) dtd = FitsDtd(rb1) ? rb1 : null;
+            Timing dtd = WithRateAtLeast(rb2, rate, 10000);
+            if (!FitsDtd(dtd))
+            {
+                dtd = WithRateAtLeast(rb1, rate, 10000);
+                if (!FitsDtd(dtd)) dtd = null;
+            }
 
             var result = (byte[])p.Bytes.Clone();
             if (dtd != null)
@@ -712,7 +736,7 @@ namespace HdrSwitch
             foreach (var x in p.Extensions)
             {
                 if (x.DisplayId == null || !x.DisplayId.Valid) continue;
-                if (AppendDisplayIdTiming(result, x, rb2))
+                if (AppendDisplayIdTiming(result, x, rb2, rate))
                 {
                     where = "DisplayID extension (block " + x.Block + ")";
                     return result;
@@ -730,7 +754,7 @@ namespace HdrSwitch
                 where = "The EDID's DisplayID extension can't be read, so a second one can't be added to it.";
                 return null;
             }
-            byte[] timing = EncodeDisplayIdTiming(v2 ? rb2 : WithClockStep(rb2, 10000), v2);
+            byte[] timing = EncodeDisplayIdTiming(WithRateAtLeast(rb2, rate, v2 ? 1000 : 10000), v2);
             if (timing == null) { where = "The timing doesn't fit a DisplayID detailed timing."; return null; }
             var grown = new byte[result.Length + BlockSize];
             Array.Copy(result, grown, result.Length);
@@ -763,12 +787,12 @@ namespace HdrSwitch
         /// Adds the timing to this DisplayID extension in place: into its detailed timing data block (Type I, or Type VII
         /// in a DisplayID 2.0 section) if it has one, else as a new data block after the others. False if there is no room.
         /// </summary>
-        static bool AppendDisplayIdTiming(byte[] edid, Extension x, Timing rb2)
+        static bool AppendDisplayIdTiming(byte[] edid, Extension x, Timing rb2, double rate)
         {
             var d = x.DisplayId;
             bool v2 = d.IsV2;
             int tag = v2 ? 0x22 : 0x03, o = x.Block * BlockSize;
-            byte[] timing = EncodeDisplayIdTiming(v2 ? rb2 : WithClockStep(rb2, 10000), v2);
+            byte[] timing = EncodeDisplayIdTiming(WithRateAtLeast(rb2, rate, v2 ? 1000 : 10000), v2);
             if (timing == null) return false;
 
             var data = new List<byte>();
